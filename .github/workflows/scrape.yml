@@ -1,0 +1,61 @@
+name: 競輪データ自動収集
+
+on:
+  schedule:
+    # 毎日 JST 9:00 (UTC 0:00) に実行
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    # 手動実行も可能（テスト用）
+    inputs:
+      force_year:
+        description: '強制指定する年（例: 2024）。空白なら自動判断'
+        required: false
+        default: ''
+      force_month:
+        description: '強制指定する月（例: 3）。空白なら自動判断'
+        required: false
+        default: ''
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340  # 最大5時間40分（GitHub Actions上限6時間に余裕を持たせる）
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+        with:
+          # pushするためにトークンを使用
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 依存ライブラリインストール
+        run: pip install -r requirements.txt
+
+      - name: スクレイピング実行
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          FORCE_YEAR: ${{ github.event.inputs.force_year }}
+          FORCE_MONTH: ${{ github.event.inputs.force_month }}
+        run: |
+          python scripts/auto_runner.py
+
+      - name: CSVをGitにコミット＆プッシュ
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add keirin_data/
+          # 変更があった場合のみコミット
+          if git diff --cached --quiet; then
+            echo "変更なし。コミットをスキップします。"
+          else
+            TODAY=$(date '+%Y-%m-%d')
+            git commit -m "🚴 競輪データ自動更新 ${TODAY}"
+            git push
+          fi

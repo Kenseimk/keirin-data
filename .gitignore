@@ -1,0 +1,13 @@
+# チェックポイントはGit管理しない（大きくなるため）
+keirin_data/checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
