@@ -1,5 +1,5 @@
-# チェックポイントはGit管理しない（大きくなるため）
-keirin_data/checkpoints/
+# チェックポイントのJSONは除外（大きくなるため）
+keirin_data/checkpoints/*.json
 
 # Python
 __pycache__/

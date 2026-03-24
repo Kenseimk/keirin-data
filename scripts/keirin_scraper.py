@@ -31,9 +31,9 @@ CHECKPOINT_DIR = OUTPUT_DIR / "checkpoints"
 
 INTERVAL_MIN = 2.5
 INTERVAL_MAX = 5.5
-BATCH_SIZE = 50
-BATCH_REST_MIN = 30
-BATCH_REST_MAX = 60
+BATCH_SIZE = 20       # 20件ごとにチェックポイント保存（50→20に縮小）
+BATCH_REST_MIN = 15   # バッチ休憩を短縮（30→15秒）
+BATCH_REST_MAX = 30   # バッチ休憩を短縮（60→30秒）
 BACKOFF_BASE = 10.0
 
 UA_POOL = [
