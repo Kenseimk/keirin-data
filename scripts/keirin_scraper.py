@@ -29,11 +29,11 @@ BASE_URL = "https://keirin.kdreams.jp"
 OUTPUT_DIR = Path("./keirin_data")
 CHECKPOINT_DIR = OUTPUT_DIR / "checkpoints"
 
-INTERVAL_MIN = 2.5
-INTERVAL_MAX = 5.5
-BATCH_SIZE = 20       # 20件ごとにチェックポイント保存（50→20に縮小）
-BATCH_REST_MIN = 15   # バッチ休憩を短縮（30→15秒）
-BATCH_REST_MAX = 30   # バッチ休憩を短縮（60→30秒）
+INTERVAL_MIN = 1.0      # 短縮（2.5→1.0秒）
+INTERVAL_MAX = 2.0      # 短縮（5.5→2.0秒）
+BATCH_SIZE = 20
+BATCH_REST_MIN = 5      # 短縮（15→5秒）
+BATCH_REST_MAX = 10     # 短縮（30→10秒）
 BACKOFF_BASE = 10.0
 
 UA_POOL = [
