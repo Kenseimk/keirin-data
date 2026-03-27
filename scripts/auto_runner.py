@@ -265,9 +265,13 @@ def main():
     csv_path = DATA_DIR / f"{year}_{month:02d}_keirin.csv"
     if csv_path.exists():
         import pandas as pd
-        df = pd.read_csv(csv_path, encoding='utf-8-sig')
-        race_count = df['race_id'].nunique() if 'race_id' in df.columns else 0
-        row_count  = len(df)
+        try:
+            df = pd.read_csv(csv_path, encoding='utf-8-sig')
+            race_count = df['race_id'].nunique() if 'race_id' in df.columns else 0
+            row_count  = len(df)
+        except pd.errors.EmptyDataError:
+            race_count = 0
+            row_count  = 0
 
         # Discord通知: 完了
         notify_done(year, month, race_count, row_count)

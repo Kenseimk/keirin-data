@@ -224,15 +224,27 @@ def parse_race(venue_slug, race_id):
         return []
 
     # --- 出走表テーブルを特定（列数に依存しないキーワード検索）---
+    def normalize_str(s):
+        """スペースを除去して正規化"""
+        return str(s).replace(" ", "").replace("\u3000", "")
+
     racecard_df = None
     for t in tables:
-        cols_str = " ".join(str(c) for c in t.columns)
-        if "競走得点" in cols_str and "脚質" in cols_str and "選手名" in cols_str:
+        cols_str = " ".join(normalize_str(c) for c in t.columns)
+        # テーブル内の全文字列も検索（ヘッダーが行データに含まれる場合）
+        try:
+            full_str = cols_str + " " + " ".join(normalize_str(v) for v in t.values.flatten() if str(v) not in ("nan", "NaN"))
+        except Exception:
+            full_str = cols_str
+        has_score = "競走得点" in cols_str or "競走得点" in full_str
+        has_style = "脚質" in cols_str or "脚質" in full_str
+        has_name = "選手名" in cols_str or "選手名" in full_str
+        if has_score and has_style and has_name:
             racecard_df = t.copy()
             break
     if racecard_df is None:
-        # デバッグ: テーブル一覧を表示
-        col_previews = [" ".join(str(c) for c in t.columns)[:50] for t in tables[:5]]
+        # デバッグ: 全テーブルの列プレビュー
+        col_previews = [" ".join(normalize_str(c) for c in t.columns)[:60] for t in tables[:8]]
         print(f"  ⚠️  出走表テーブル見つからず {race_id}: テーブル数={len(tables)}, 列プレビュー={col_previews}")
         return []
 
