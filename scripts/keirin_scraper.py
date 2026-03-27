@@ -231,6 +231,9 @@ def parse_race(venue_slug, race_id):
             racecard_df = t.copy()
             break
     if racecard_df is None:
+        # デバッグ: テーブル一覧を表示
+        col_previews = [" ".join(str(c) for c in t.columns)[:50] for t in tables[:5]]
+        print(f"  ⚠️  出走表テーブル見つからず {race_id}: テーブル数={len(tables)}, 列プレビュー={col_previews}")
         return []
 
     # 列名を文字列にフラット化（MultiIndexの場合も対応）
@@ -381,16 +384,26 @@ def scrape_month(year, month, resume=False):
     print(f"  未処理: {len(remaining)}件 / 全{len(all_races)}件")
 
     batch_count = 0
+    parse_success = 0
+    parse_empty = 0
+
     for i, (venue_slug, race_id) in enumerate(tqdm(remaining, desc="レース取得")):
         try:
             rows = parse_race(venue_slug, race_id)
-            all_rows.extend(rows)
+            if rows:
+                parse_success += 1
+                all_rows.extend(rows)
+            else:
+                parse_empty += 1
+                if parse_empty <= 5:  # 最初の5件だけ警告表示
+                    print(f"  ⚠️  空データ: {venue_slug}/{race_id}")
             done_items.append((venue_slug, race_id))
             human_wait()
 
             if (i + 1) % BATCH_SIZE == 0:
                 batch_count += 1
                 save_checkpoint(year, month, done_items, all_rows)
+                print(f"  📊 進捗: 成功={parse_success} 空={parse_empty} 累計行数={len(all_rows)}")
                 batch_rest(batch_count)
 
         except KeyboardInterrupt:
@@ -402,6 +415,7 @@ def scrape_month(year, month, resume=False):
             print(f"  ⚠️  スキップ {venue_slug}/{race_id}: {e}")
             continue
 
+    print(f"\n📊 最終集計: 成功={parse_success} 空={parse_empty} 累計行数={len(all_rows)}")
     save_checkpoint(year, month, done_items, all_rows)
     return all_rows
 
@@ -432,11 +446,15 @@ def main():
     all_total = []
     for month in months:
         rows = scrape_month(args.year, month, args.resume)
+        print(f"\n📋 scrape_month 戻り値: {len(rows)}行")
+        # rowsが空でもCSVを保存（デバッグ用・auto_runner.pyがCSV存在確認するため）
+        save_month_csv(args.year, month, rows)
         if rows:
-            save_month_csv(args.year, month, rows)
             all_total.extend(rows)
             print(f"  サンプル（先頭3行）:")
             print(pd.DataFrame(rows).head(3).to_string())
+        else:
+            print(f"  ⚠️  データが空です。parse_raceの戻り値を確認してください。")
 
     if len(months) > 1 and all_total:
         fp = OUTPUT_DIR / f"{args.year}_all_keirin.csv"

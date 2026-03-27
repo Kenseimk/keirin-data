@@ -281,8 +281,10 @@ def main():
                 total_races=len(get_target_months()) * 650
             )
     else:
-        notify_error(year, month, f"CSVファイルが生成されませんでした: {csv_path}")
-        sys.exit(1)
+        # CSVがない場合も警告だけで終了（exit(1)しない → git pushステップが動く）
+        print(f"⚠️  CSVが見つかりません: {csv_path}")
+        print("チェックポイントは保存されているので次回resumeで再開されます。")
+        notify_error(year, month, f"CSVファイルが生成されませんでした（チェックポイントは保存済み）: {csv_path}")
 
 if __name__ == "__main__":
     main()

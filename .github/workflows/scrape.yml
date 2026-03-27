@@ -2,7 +2,6 @@ name: 競輪データ自動収集
 
 on:
   schedule:
-    # 毎日 JST 9:00 (UTC 0:00) に実行
     - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
@@ -14,6 +13,10 @@ on:
         description: '強制指定する月（例: 3）。空白なら自動判断'
         required: false
         default: ''
+
+permissions:
+  contents: write   # git push に必要
+  actions: write    # workflow起動に必要
 
 jobs:
   scrape:
@@ -41,20 +44,49 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           FORCE_YEAR: ${{ github.event.inputs.force_year }}
           FORCE_MONTH: ${{ github.event.inputs.force_month }}
-        run: |
-          python scripts/auto_runner.py
+        run: python scripts/auto_runner.py
 
       - name: CSVをGitにコミット＆プッシュ
-        if: always()  # タイムアウト・エラー時でも必ず実行
+        if: always()
+        id: git_push
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add keirin_data/
           if git diff --cached --quiet; then
-            echo "変更なし。コミットをスキップします。"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "変更なし。スキップします。"
           else
-            TODAY=$(date '+%Y-%m-%d')
+            TODAY=$(date '+%Y-%m-%d %H:%M')
             git commit -m "🚴 競輪データ自動更新 ${TODAY}"
             git push
+            echo "has_changes=true" >> $GITHUB_OUTPUT
           fi
 
+      - name: 次の月を即座に起動
+        if: steps.git_push.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REMAINING=$(python -c "
+          from pathlib import Path
+          from datetime import datetime
+          data_dir = Path('keirin_data')
+          now = datetime.now()
+          remaining = 0
+          y, m = 2023, 1
+          while (y, m) <= (now.year, now.month):
+              if not (data_dir / f'{y}_{m:02d}_keirin.csv').exists():
+                  remaining += 1
+              m += 1
+              if m > 12:
+                  m, y = 1, y + 1
+          print(remaining)
+          ")
+          echo "残り: ${REMAINING}ヶ月"
+          if [ "$REMAINING" -gt "0" ]; then
+            echo "次の月を即座に起動..."
+            gh workflow run scrape.yml --repo $GITHUB_REPOSITORY
+          else
+            echo "🎉 全月収集完了！"
+          fi
