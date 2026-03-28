@@ -19,6 +19,7 @@
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
+from io import StringIO
 import time, re, json, random, argparse
 from datetime import datetime
 from tqdm import tqdm
@@ -218,7 +219,7 @@ def parse_race(venue_slug, race_id):
         race_no = None
 
     try:
-        tables = pd.read_html(url)
+        tables = pd.read_html(StringIO(resp.text))
     except Exception as e:
         print(f"  ⚠️  テーブル取得失敗 {race_id}: {e}")
         return []
@@ -276,8 +277,8 @@ def parse_race(venue_slug, race_id):
             t_str = t.to_string()
             if "最 終 B S" in t_str or "周 回 ・ 戦 法" in t_str:
                 if len(t) >= 2:
-                    marks = [str(v) for v in t.iloc[0].values if str(v) not in ("nan", "NaN")]
-                    banums = [str(v) for v in t.iloc[1].values if str(v) not in ("nan", "NaN")]
+                    marks  = [str(v) for v in t.iloc[0].values[1:] if str(v) not in ("nan", "NaN")]
+                    banums = [str(v) for v in t.iloc[1].values[1:] if str(v) not in ("nan", "NaN")]
                     lineup_text = " ".join(f"{m}{b}" for m, b in zip(marks, banums))
                 break
     except Exception:
