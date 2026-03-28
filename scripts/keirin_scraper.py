@@ -283,45 +283,62 @@ def parse_race(venue_slug, race_id):
     except Exception:
         pass
 
-    # --- レース結果テーブル（内容で特定）---
+    # --- レース結果テーブル（"着 順"が独立した列名として存在するテーブルを特定）---
     result_lookup = {}
     try:
         for t in tables:
-            cols_str = " ".join(str(c) for c in t.columns)
-            if "着 順" in cols_str or "着順" in cols_str:
-                t.columns = [flatten_col(c) for c in t.columns]
-                rc_banum  = find_col(t, ["車 番"]) or find_col(t, ["車番"])
-                rc_rank   = find_col(t, ["着 順"]) or find_col(t, ["着順"])
-                rc_agari  = find_col(t, ["上り"]) or find_col(t, ["上 り"])
-                rc_finish = find_col(t, ["決ま"]) or find_col(t, ["決まり手"])
-                rc_margin = find_col(t, ["着差"])
-                rc_winlose= find_col(t, ["勝敗因"])
-                if not (rc_banum and rc_rank):
+            flat_cols = [flatten_col(c) for c in t.columns]
+            flat_cols_norm = [c.replace(" ", "").replace("\u3000", "") for c in flat_cols]
+            # "着順"が独立した列名として存在する（"日付/種目/着順/上り"のような埋め込みは除外）
+            if not any(c == "着順" for c in flat_cols_norm):
+                continue
+            t2 = t.copy()
+            t2.columns = flat_cols
+            rc_banum  = find_col(t2, ["車 番"]) or find_col(t2, ["車番"])
+            rc_rank   = find_col(t2, ["着 順"]) or find_col(t2, ["着順"])
+            rc_agari  = find_col(t2, ["上り"]) or find_col(t2, ["上 り"])
+            rc_finish = find_col(t2, ["決ま"]) or find_col(t2, ["決まり手"])
+            rc_margin = find_col(t2, ["着差"])
+            rc_winlose= find_col(t2, ["勝敗因"])
+            if not (rc_banum and rc_rank):
+                continue
+            for _, row in t2.iterrows():
+                try:
+                    banum = str(int(float(str(row[rc_banum]))))
+                    result_lookup[banum] = {
+                        "rank":        str(row[rc_rank]),
+                        "agari":       str(row[rc_agari])   if rc_agari   else "",
+                        "finish_type": str(row[rc_finish])  if rc_finish  else "",
+                        "margin":      str(row[rc_margin])  if rc_margin  else "",
+                        "win_lose":    str(row[rc_winlose]) if rc_winlose else "",
+                    }
+                except Exception:
                     continue
-                for _, row in t.iterrows():
-                    try:
-                        banum = str(int(float(str(row[rc_banum]))))
-                        result_lookup[banum] = {
-                            "rank":        str(row[rc_rank]),
-                            "agari":       str(row[rc_agari])   if rc_agari   else "",
-                            "finish_type": str(row[rc_finish])  if rc_finish  else "",
-                            "margin":      str(row[rc_margin])  if rc_margin  else "",
-                            "win_lose":    str(row[rc_winlose]) if rc_winlose else "",
-                        }
-                    except Exception:
-                        continue
+            if result_lookup:
                 break
     except Exception:
         pass
 
-    # --- 払戻金テーブル（内容で特定）---
-    payout_text = ""
+    # --- 払戻金テーブル（正規化マッチで特定・二車連単と三連勝単を構造化取得）---
+    ni_sha_tan  = ""
+    san_ren_tan = ""
     try:
         for t in tables:
-            t_str = t.to_string()
-            if "2 車 連 単" in t_str or "3 連 勝 単" in t_str or "二車連単" in t_str:
-                payout_text = t_str[:300]
-                break
+            t_str_norm = t.to_string().replace(" ", "").replace("\u3000", "")
+            if "車連単" not in t_str_norm and "連勝単" not in t_str_norm:
+                continue
+            for row_vals_raw in t.values:
+                vals_norm = [str(v).replace(" ", "").replace("\u3000", "") for v in row_vals_raw]
+                vals_orig = [str(v) for v in row_vals_raw]
+                for j, v in enumerate(vals_norm):
+                    if v == "単" and j > 0:
+                        prev = vals_norm[j - 1]
+                        nxt  = vals_orig[j + 1].strip() if j + 1 < len(vals_orig) else ""
+                        if "車連" in prev and not ni_sha_tan:
+                            ni_sha_tan = nxt
+                        if "連勝" in prev and not san_ren_tan:
+                            san_ren_tan = nxt
+            break
     except Exception:
         pass
 
@@ -352,7 +369,8 @@ def parse_race(venue_slug, race_id):
             "date":         date_str,
             "race_no":      race_no,
             "lineup":       lineup_text,
-            "payout":       payout_text[:200],
+            "ni_sha_tan":   ni_sha_tan,
+            "san_ren_tan":  san_ren_tan,
             # 選手情報
             "banum":        banum,
             "player_name":  name,

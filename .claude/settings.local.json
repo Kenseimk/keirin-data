@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh run:*)",
+      "Bash(export PATH=\"$PATH:/c/Program Files/GitHub CLI\")",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git pull:*)",
+      "Bash(gh workflow:*)",
+      "Bash(for f:*)",
+      "Bash(do echo:*)",
+      "Read(//d/cloude/keirin-data/**)",
+      "Bash(done)",
+      "Bash(python3:*)"
+    ]
+  }
+}
