@@ -59,12 +59,18 @@ jobs:
           else
             TODAY=$(date '+%Y-%m-%d %H:%M')
             git commit -m "🚴 競輪データ自動更新 ${TODAY}"
-            git push
+            # 並列実行時の競合対策: pull --rebase してからpush（最大5回リトライ）
+            for i in 1 2 3 4 5; do
+              git pull --rebase && git push && break
+              echo "Push失敗 (試行${i}/5)、10秒後リトライ..."
+              sleep 10
+            done
             echo "has_changes=true" >> $GITHUB_OUTPUT
           fi
 
       - name: 次の月を即座に起動
-        if: steps.git_push.outputs.has_changes == 'true'
+        # force_year指定の並列実行時はカスケードしない（無限増殖防止）
+        if: steps.git_push.outputs.has_changes == 'true' && github.event.inputs.force_year == ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -88,5 +94,5 @@ jobs:
             echo "次の月を即座に起動..."
             gh workflow run scrape.yml --repo $GITHUB_REPOSITORY
           else
-            echo "🎉 全月収集完了！"
+            echo "全月収集完了！"
           fi
