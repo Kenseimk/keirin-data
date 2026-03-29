@@ -320,13 +320,14 @@ def parse_race(venue_slug, race_id):
     except Exception:
         pass
 
-    # --- 払戻金テーブル（正規化マッチで特定・二車連単と三連勝単を構造化取得）---
+    # --- 払戻金テーブル（正規化マッチで特定・二車連単・三連勝単・三連複を構造化取得）---
     ni_sha_tan  = ""
     san_ren_tan = ""
+    san_ren_fuku = ""
     try:
         for t in tables:
             t_str_norm = t.to_string().replace(" ", "").replace("\u3000", "")
-            if "車連単" not in t_str_norm and "連勝単" not in t_str_norm:
+            if "車連単" not in t_str_norm and "連勝単" not in t_str_norm and "連複" not in t_str_norm:
                 continue
             for row_vals_raw in t.values:
                 vals_norm = [str(v).replace(" ", "").replace("\u3000", "") for v in row_vals_raw]
@@ -339,6 +340,11 @@ def parse_race(venue_slug, race_id):
                             ni_sha_tan = nxt
                         if "連勝" in prev and not san_ren_tan:
                             san_ren_tan = nxt
+                    if v == "複" and j > 0:
+                        prev = vals_norm[j - 1]
+                        nxt  = vals_orig[j + 1].strip() if j + 1 < len(vals_orig) else ""
+                        if ("三連" in prev or "連複" in prev) and not san_ren_fuku:
+                            san_ren_fuku = nxt
             break
     except Exception:
         pass
@@ -372,6 +378,7 @@ def parse_race(venue_slug, race_id):
             "lineup":       lineup_text,
             "ni_sha_tan":   ni_sha_tan,
             "san_ren_tan":  san_ren_tan,
+            "san_ren_fuku": san_ren_fuku,
             # 選手情報
             "banum":        banum,
             "player_name":  name,
