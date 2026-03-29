@@ -343,7 +343,7 @@ def parse_race(venue_slug, race_id):
                     if v == "複" and j > 0:
                         prev = vals_norm[j - 1]
                         nxt  = vals_orig[j + 1].strip() if j + 1 < len(vals_orig) else ""
-                        if ("三連" in prev or "連複" in prev) and not san_ren_fuku:
+                        if "連勝" in prev and not san_ren_fuku:
                             san_ren_fuku = nxt
             break
     except Exception:
