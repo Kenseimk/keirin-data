@@ -1,0 +1,70 @@
+name: 競輪予想 Discord投稿
+
+on:
+  schedule:
+    # JST 10:00 / 12:00 / 14:00 / 16:00 (UTC 01:00 / 03:00 / 05:00 / 07:00)
+    - cron: '0 1 * * *'
+    - cron: '0 3 * * *'
+    - cron: '0 5 * * *'
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: '対象日 (例: 2026-03-31)。空白で今日'
+        required: false
+        default: ''
+      hour:
+        description: 'JST時刻 (例: 10)。空白で現在時刻'
+        required: false
+        default: ''
+      all_races:
+        description: '全レース帯を投稿する (true/false)'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: read
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 依存ライブラリインストール
+        run: pip install -r requirements.txt
+
+      - name: 当日データをスクレイピング
+        run: |
+          TODAY=$(TZ=Asia/Tokyo date '+%Y-%m-%d')
+          YEAR=$(echo $TODAY | cut -d'-' -f1)
+          MONTH=$(echo $TODAY | cut -d'-' -f2 | sed 's/^0//')
+          echo "スクレイピング対象: ${YEAR}年${MONTH}月"
+          python scripts/keirin_scraper.py --year $YEAR --month $MONTH --resume || true
+
+      - name: 予想生成 & Discord投稿
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          DATE_OPT=""
+          HOUR_OPT=""
+          ALL_OPT=""
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            DATE_OPT="--date ${{ github.event.inputs.date }}"
+          fi
+          if [ -n "${{ github.event.inputs.hour }}" ]; then
+            HOUR_OPT="--hour ${{ github.event.inputs.hour }}"
+          fi
+          if [ "${{ github.event.inputs.all_races }}" = "true" ]; then
+            ALL_OPT="--all"
+          fi
+          python scripts/predict_today.py $DATE_OPT $HOUR_OPT $ALL_OPT

@@ -1,3 +1,10 @@
+# -*- coding: utf-8 -*-
+import sys, io as _io
+if hasattr(sys.stdout, 'buffer'):
+    sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'buffer'):
+    sys.stderr = _io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 """
 競輪データ収集スクリプト v3.0
 ソース: 楽天Kドリームス (keirin.kdreams.jp)
@@ -405,7 +412,7 @@ def parse_race(venue_slug, race_id):
 
 def scrape_month(year, month, resume=False):
     print(f"\n{'='*55}")
-    print(f"🚴 競輪データ収集 v3.0: {year}年{month}月")
+    print(f"[keirin] 競輪データ収集 v3.0: {year}年{month}月")
     print(f"{'='*55}")
 
     done_items, all_rows = [], []
