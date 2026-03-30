@@ -45,11 +45,14 @@ jobs:
 
       - name: 当日データをスクレイピング
         run: |
-          TODAY=$(TZ=Asia/Tokyo date '+%Y-%m-%d')
-          YEAR=$(echo $TODAY | cut -d'-' -f1)
-          MONTH=$(echo $TODAY | cut -d'-' -f2 | sed 's/^0//')
-          echo "スクレイピング対象: ${YEAR}年${MONTH}月"
-          python scripts/keirin_scraper.py --year $YEAR --month $MONTH --resume || true
+          # 対象日を決定（手動実行時は入力値、それ以外は今日）
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            TARGET="${{ github.event.inputs.date }}"
+          else
+            TARGET=$(TZ=Asia/Tokyo date '+%Y-%m-%d')
+          fi
+          echo "スクレイピング対象: ${TARGET}"
+          python scripts/scrape_day.py --date $TARGET || true
 
       - name: 予想生成 & Discord投稿
         env:
