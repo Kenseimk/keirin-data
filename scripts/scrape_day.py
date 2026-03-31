@@ -56,9 +56,10 @@ def main():
     csv_path = OUTPUT_DIR / f"{year}_{month:02d}_keirin.csv"
     if csv_path.exists():
         df_existing = pd.read_csv(csv_path, encoding="utf-8-sig")
-        # 重複除去（race_id + banum）
+        # 重複除去（race_id単位）型不一致(int/str)対策で文字列に統一して比較
         if "race_id" in df_existing.columns and "race_id" in df_new.columns:
-            df_existing = df_existing[~df_existing["race_id"].isin(df_new["race_id"].unique())]
+            new_ids = df_new["race_id"].astype(str).unique()
+            df_existing = df_existing[~df_existing["race_id"].astype(str).isin(new_ids)]
         df_out = pd.concat([df_existing, df_new], ignore_index=True)
     else:
         df_out = df_new
