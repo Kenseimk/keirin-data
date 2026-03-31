@@ -50,7 +50,7 @@ def main():
         return
 
     df_new = pd.DataFrame(rows)
-    df_new["date"] = df_new["date"] if "date" in df_new.columns else args.date
+    df_new["date"] = args.date  # race_idに埋まる開催初日ではなく実際のスクレイピング日付で上書き
 
     # 既存CSVに追記
     csv_path = OUTPUT_DIR / f"{year}_{month:02d}_keirin.csv"

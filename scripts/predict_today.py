@@ -141,8 +141,8 @@ model = lgb.LGBMClassifier(n_estimators=300, learning_rate=0.05,
                             verbose=-1, random_state=42)
 model.fit(df_train[FEATURES].values, df_train["is_winner"].values)
 
-# ========== 当日データ ==========
-df_today = df_model[df_model["date"] == TARGET_DATE].copy()
+# ========== 当日データ（未完走レースもrank_numなしで予測対象にする） ==========
+df_today = df_all[df_all["date"] == TARGET_DATE].dropna(subset=FEATURES).copy()
 if df_today.empty:
     msg = f"**{TARGET_DATE} の予想データがありません**\n（当日データ未収集の可能性があります）"
     post_discord(msg)
