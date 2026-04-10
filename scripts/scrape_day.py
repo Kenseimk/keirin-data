@@ -10,7 +10,7 @@ from pathlib import Path
 # keirin_scraper の関数を流用（io設定はkeirin_scraperに任せる）
 sys.path.insert(0, str(Path(__file__).parent))
 from keirin_scraper import (
-    get_races_for_day, parse_race,
+    get_races_for_day, parse_race, get_venue_close_times,
     human_wait, BATCH_SIZE, batch_rest
 )
 
@@ -27,9 +27,21 @@ def scrape_day(year, month, day):
         print("  レースなし")
         return []
 
+    # 会場ごとに締切時間を事前取得
+    venues = list(dict.fromkeys(slug for slug, _ in races))
+    venue_times = {}
+    for v in venues:
+        venue_times[v] = get_venue_close_times(v)
+        human_wait()
+
     rows = []
     for i, (venue_slug, race_id) in enumerate(tqdm(races, desc="取得中")):
         result = parse_race(venue_slug, race_id)
+        # 締切時間を各行に付与
+        times = venue_times.get(venue_slug, {})
+        for row in result:
+            rno = row.get('race_no')
+            row['close_time'] = times.get(int(rno), '') if rno is not None else ''
         rows.extend(result)
         human_wait()
         if (i + 1) % BATCH_SIZE == 0:

@@ -104,6 +104,7 @@ for race_id, g in df_today.groupby('race_id'):
         continue
     venue = g['venue_slug'].iloc[0]
     rno   = int(g['race_no'].iloc[0])
+    close_time = g['close_time'].iloc[0] if 'close_time' in g.columns else ''
 
     g = g.sort_values('p1', ascending=False).copy()
     pred1 = int(g.iloc[0]['banum'])
@@ -112,7 +113,8 @@ for race_id, g in df_today.groupby('race_id'):
     rest3 = g[~g['banum'].isin([pred1,pred2])].sort_values('p3', ascending=False)
     pred3 = int(rest3.iloc[0]['banum']) if len(rest3)>=1 else '-'
 
-    print(f'\n【{venue} {rno}R】予想: {pred1}-{pred2}-{pred3}  (top_score:{ts:.1f} gap:{sg:.1f})')
+    time_str = f'  締切:{close_time}' if close_time else ''
+    print(f'\n【{venue} {rno}R】予想: {pred1}-{pred2}-{pred3}  (top_score:{ts:.1f} gap:{sg:.1f}){time_str}')
     print(f'  {"車":>3} {"脚質":>4} {"得点":>7} {"1着%":>7} {"2着%":>7} {"3着%":>7}  {"予想印"}')
     print(f'  {"-"*52}')
     for _, row in g.iterrows():

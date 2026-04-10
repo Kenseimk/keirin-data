@@ -202,14 +202,15 @@ for race_id, grp_r in df_today.groupby("race_id"):
     rest3 = grp_r[~grp_r["banum"].isin([pred_1, pred_2])].sort_values("p3_proba", ascending=False)
     pred_3 = int(rest3.iloc[0]["banum"]) if len(rest3) >= 1 else None
     rows.append({
-        "race_id":   race_id,
-        "venue":     grp_r["venue_slug"].iloc[0],
-        "date":      grp_r["date"].iloc[0],
-        "race_no":   grp_r["race_no"].iloc[0],
-        "pred_1st":  pred_1,
-        "pred_2nd":  pred_2,
-        "pred_3rd":  pred_3,
-        "top_proba": top_proba,
+        "race_id":    race_id,
+        "venue":      grp_r["venue_slug"].iloc[0],
+        "date":       grp_r["date"].iloc[0],
+        "race_no":    grp_r["race_no"].iloc[0],
+        "pred_1st":   pred_1,
+        "pred_2nd":   pred_2,
+        "pred_3rd":   pred_3,
+        "top_proba":  top_proba,
+        "close_time": grp_r["close_time"].iloc[0] if "close_time" in grp_r.columns else "",
     })
 rp = pd.DataFrame(rows)
 
@@ -242,8 +243,10 @@ else:
     for _, row in filtered.iterrows():
         p2 = int(row["pred_2nd"]) if pd.notna(row["pred_2nd"]) else "?"
         p3 = int(row["pred_3rd"]) if pd.notna(row["pred_3rd"]) else "?"
+        ct = row.get("close_time", "")
+        time_str = f"  締切: {ct}" if ct else ""
         lines.append(
-            f":round_pushpin: **{row['venue']} {int(row['race_no'])}R**\n"
+            f":round_pushpin: **{row['venue']} {int(row['race_no'])}R**{time_str}\n"
             f"  予想: `{int(row['pred_1st'])}-{p2}-{p3}`\n"
             f"  top_score: {row['top_score']:.1f} / gap: {row['score_gap']:.1f}"
         )

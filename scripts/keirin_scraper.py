@@ -161,6 +161,41 @@ def load_checkpoint(year, month):
     print(f"  📂 復元: {len(done_items)}件完了済み ({cp['saved_at']})")
     return done_items, rows
 
+# ========== 会場ページから締切時間を取得 ==========
+
+def get_venue_close_times(venue_slug):
+    """
+    会場トップページから各レースの締切時間を取得。
+    返り値: {race_no(int): '15:49', ...}
+    """
+    url = f"{BASE_URL}/{venue_slug}/"
+    resp = fetch(url)
+    if resp is None:
+        return {}
+    try:
+        from bs4 import BeautifulSoup as _BS
+        soup = _BS(resp.text, "html.parser")
+        for tbl in soup.find_all("table"):
+            rows = tbl.find_all("tr")
+            race_row = time_row = None
+            for row in rows:
+                cells = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
+                if cells and "1R" in cells:
+                    race_row = cells
+                if cells and any("締切時間" in c for c in cells):
+                    time_row = cells
+            if race_row and time_row:
+                result = {}
+                for r, t in zip(race_row, time_row):
+                    rno_m = re.search(r"(\d+)R", r)
+                    t_m   = re.search(r"(\d{1,2}:\d{2})", t)
+                    if rno_m and t_m:
+                        result[int(rno_m.group(1))] = t_m.group(1)
+                return result
+    except Exception:
+        pass
+    return {}
+
 # ========== Step1: 日付別ページからレース一覧取得 ==========
 
 def get_races_for_day(year, month, day):
