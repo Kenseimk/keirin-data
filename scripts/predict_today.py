@@ -42,10 +42,9 @@ HOUR_JST    = args.hour if args.hour is not None else now_jst.hour
 
 # 時間帯 → race_no 範囲
 def race_no_range(hour):
-    if hour < 12:   return (1,  3)
-    elif hour < 14: return (4,  6)
-    elif hour < 16: return (7,  9)
-    else:           return (10, 99)
+    if hour < 12:   return (1,  4)   # 8時台  → 1〜4R
+    elif hour < 19: return (5,  9)   # 12時台 → 5〜9R
+    else:           return (10, 99)  # 19時台 → 10R以降
 
 RACE_RANGE = (1, 99) if args.all else race_no_range(HOUR_JST)
 print(f"対象日: {TARGET_DATE}  JST {HOUR_JST}時台  race_no {RACE_RANGE[0]}〜{RACE_RANGE[1]}")
@@ -88,6 +87,15 @@ df_all["gear"]          = pd.to_numeric(df_all["gear"], errors="coerce")
 df_all["banum"]         = pd.to_numeric(df_all["banum"], errors="coerce")
 df_all["is_win"]        = (df_all["rank_num"]==1).astype(float)
 df_all["is_winner"]     = (df_all["rank_num"]==1).astype(int)
+df_all["is_2nd"]        = (df_all["rank_num"]==2).astype(int)
+df_all["is_3rd"]        = (df_all["rank_num"]==3).astype(int)
+# 直近4ヶ月成績（新規スクレイピング分のみ存在、旧データはNaN→LGBMがNaN対応）
+df_all["mark_num"]      = pd.to_numeric(df_all.get("mark_num"),      errors="coerce")
+df_all["win_rate_4m"]   = pd.to_numeric(df_all.get("win_rate_4m"),   errors="coerce")
+df_all["top2_rate_4m"]  = pd.to_numeric(df_all.get("top2_rate_4m"),  errors="coerce")
+df_all["top3_rate_4m"]  = pd.to_numeric(df_all.get("top3_rate_4m"),  errors="coerce")
+df_all["nige_4m"]       = pd.to_numeric(df_all.get("nige_4m"),       errors="coerce")
+df_all["maku_4m"]       = pd.to_numeric(df_all.get("maku_4m"),       errors="coerce")
 
 df_all = df_all.sort_values(["player_key","date","race_no"]).reset_index(drop=True)
 grp = df_all.groupby("player_key")["rank_num"]
@@ -113,10 +121,14 @@ df_all["is_winner"]    = (df_all["rank_num"]==1).astype(int)
 n_pl = df_all.groupby("race_id")["banum"].count().rename("n_players_in_race")
 df_all = df_all.join(n_pl, on="race_id")
 
-FEATURES = ["race_score","class_num","style_num","gear",
-            "score_rank","is_honmei","n_players_in_race",
-            "prev1_rank","last3_avg_rank","last5_avg_rank",
-            "last5_win_rate","rank_trend","days_since_last"]
+FEATURES_BASE = ["race_score","class_num","style_num","gear",
+                 "score_rank","is_honmei","n_players_in_race",
+                 "prev1_rank","last3_avg_rank","last5_avg_rank",
+                 "last5_win_rate","rank_trend","days_since_last"]
+# 直近4ヶ月成績（新規スクレイピング分のみ存在、旧データはNaN→LGBMがNaN対応）
+FEATURES_NEW  = ["mark_num","win_rate_4m","top2_rate_4m","top3_rate_4m",
+                 "nige_4m","maku_4m"]
+FEATURES = FEATURES_BASE + FEATURES_NEW
 
 # score_gap・top_score・n_players をdf_allから計算（バグ修正済み）
 def calc_gap(x):
@@ -127,7 +139,7 @@ score_gap_raw = df_all.groupby("race_id")["race_score"].apply(calc_gap)
 top_score_raw = df_all.groupby("race_id")["race_score"].max()
 n_players_raw = df_all.groupby("race_id")["banum"].nunique()
 
-df_model = df_all.dropna(subset=FEATURES+["rank_num"]).copy()
+df_model = df_all.dropna(subset=FEATURES_BASE+["rank_num"]).copy()
 
 # ========== 訓練: 対象日より前 ==========
 df_train = df_model[df_model["date"] < TARGET_DATE]
@@ -136,30 +148,70 @@ if len(df_train) < 1000:
     sys.exit(1)
 
 print(f"訓練: {len(df_train):,}行 ({df_train['race_id'].nunique():,}レース)")
-model = lgb.LGBMClassifier(n_estimators=300, learning_rate=0.05,
-                            num_leaves=31, min_child_samples=50,
-                            verbose=-1, random_state=42)
-model.fit(df_train[FEATURES].values, df_train["is_winner"].values)
+
+# 訓練データの末尾3ヶ月を検証用（early stopping）
+VAL_MONTHS = 3
+ES_ROUNDS  = 50
+all_months = sorted(df_train['date'].str[:7].unique())
+val_months_list = all_months[-VAL_MONTHS:]
+val_mask = df_train['date'].str[:7].isin(val_months_list)
+df_tr  = df_train[~val_mask]
+df_val = df_train[val_mask]
+print(f"  学習: {len(df_tr):,}行  検証(early stopping): {len(df_val):,}行")
+
+LGB_PARAMS = dict(n_estimators=1000, learning_rate=0.05,
+                  num_leaves=31, min_child_samples=50,
+                  verbose=-1, random_state=42)
+
+def fit_es(params, X_tr, y_tr, X_val, y_val):
+    m = lgb.LGBMClassifier(**params)
+    m.fit(X_tr, y_tr,
+          eval_set=[(X_val, y_val)],
+          callbacks=[lgb.early_stopping(ES_ROUNDS, verbose=False),
+                     lgb.log_evaluation(-1)])
+    return m
+
+X_tr  = df_tr[FEATURES].values
+X_val = df_val[FEATURES].values
+model  = fit_es(LGB_PARAMS, X_tr, df_tr["is_winner"].values, X_val, df_val["is_winner"].values)
+model2 = fit_es(LGB_PARAMS, X_tr, df_tr["is_2nd"].values,    X_val, df_val["is_2nd"].values)
+model3 = fit_es(LGB_PARAMS, X_tr, df_tr["is_3rd"].values,    X_val, df_val["is_3rd"].values)
+print(f"  best iterations: 1着={model.best_iteration_} / 2着={model2.best_iteration_} / 3着={model3.best_iteration_}")
 
 # ========== 当日データ（未完走レースもrank_numなしで予測対象にする） ==========
-df_today = df_all[df_all["date"] == TARGET_DATE].dropna(subset=FEATURES).copy()
+df_today = df_all[df_all["date"] == TARGET_DATE].dropna(subset=FEATURES_BASE).copy()
 if df_today.empty:
     msg = f"**{TARGET_DATE} の予想データがありません**\n（当日データ未収集の可能性があります）"
     post_discord(msg)
     print(msg)
     sys.exit(0)
 
-df_today["win_proba"] = model.predict_proba(df_today[FEATURES].values)[:, 1]
-ds = df_today.sort_values(["race_id","win_proba"], ascending=[True,False])
-rp = ds.groupby("race_id").agg(
-    venue   =("venue_slug","first"),
-    date    =("date","first"),
-    race_no =("race_no","first"),
-    pred_1st=("banum", lambda x: int(x.iloc[0])),
-    pred_2nd=("banum", lambda x: int(x.iloc[1]) if len(x)>1 else None),
-    pred_3rd=("banum", lambda x: int(x.iloc[2]) if len(x)>2 else None),
-    top_proba=("win_proba", lambda x: x.iloc[0]),
-).reset_index()
+df_today["win_proba"] = model.predict_proba( df_today[FEATURES].values)[:, 1]
+df_today["p2_proba"]  = model2.predict_proba(df_today[FEATURES].values)[:, 1]
+df_today["p3_proba"]  = model3.predict_proba(df_today[FEATURES].values)[:, 1]
+
+rows = []
+for race_id, grp_r in df_today.groupby("race_id"):
+    grp_r = grp_r.sort_values("win_proba", ascending=False)
+    if len(grp_r) < 3:
+        continue
+    pred_1 = int(grp_r.iloc[0]["banum"])
+    top_proba = float(grp_r.iloc[0]["win_proba"])
+    rest2 = grp_r[grp_r["banum"] != pred_1].sort_values("p2_proba", ascending=False)
+    pred_2 = int(rest2.iloc[0]["banum"]) if len(rest2) >= 1 else None
+    rest3 = grp_r[~grp_r["banum"].isin([pred_1, pred_2])].sort_values("p3_proba", ascending=False)
+    pred_3 = int(rest3.iloc[0]["banum"]) if len(rest3) >= 1 else None
+    rows.append({
+        "race_id":   race_id,
+        "venue":     grp_r["venue_slug"].iloc[0],
+        "date":      grp_r["date"].iloc[0],
+        "race_no":   grp_r["race_no"].iloc[0],
+        "pred_1st":  pred_1,
+        "pred_2nd":  pred_2,
+        "pred_3rd":  pred_3,
+        "top_proba": top_proba,
+    })
+rp = pd.DataFrame(rows)
 
 rp["score_gap"] = rp["race_id"].map(score_gap_raw)
 rp["top_score"] = rp["race_id"].map(top_score_raw)
@@ -197,5 +249,5 @@ else:
         )
 
     msg = "\n".join(lines)
-    post_discord(msg)
     print(msg)
+    post_discord(msg)

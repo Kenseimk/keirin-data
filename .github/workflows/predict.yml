@@ -2,11 +2,12 @@ name: 競輪予想 Discord投稿
 
 on:
   schedule:
-    # JST 10:00 / 12:00 / 14:00 / 16:00 (UTC 01:00 / 03:00 / 05:00 / 07:00)
-    - cron: '0 1 * * *'
+    # 予想投稿: JST 8:00 / 12:00 / 19:00 (UTC 23:00前日 / 03:00 / 10:00)
+    - cron: '0 23 * * *'
     - cron: '0 3 * * *'
-    - cron: '0 5 * * *'
-    - cron: '0 7 * * *'
+    - cron: '0 10 * * *'
+    # 当日成績レポート: JST 22:00 (UTC 13:00)
+    - cron: '0 13 * * *'
   workflow_dispatch:
     inputs:
       date:
@@ -21,6 +22,10 @@ on:
         description: '全レース帯を投稿する (true/false)'
         required: false
         default: 'false'
+      report:
+        description: '当日成績レポートを投稿する (true/false)'
+        required: false
+        default: 'false'
 
 permissions:
   contents: read
@@ -29,6 +34,11 @@ jobs:
   predict:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # 予想投稿: JST 10/12/14/16時のスケジュール、または手動でreport=false
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.report != 'true') ||
+      (github.event_name == 'schedule' && github.event.schedule != '0 13 * * *')
+    # 予想投稿: UTC 23:00(JST8時) / 03:00(JST12時) / 10:00(JST19時)
 
     steps:
       - name: リポジトリをチェックアウト
@@ -45,7 +55,6 @@ jobs:
 
       - name: 当日データをスクレイピング
         run: |
-          # 対象日を決定（手動実行時は入力値、それ以外は今日）
           if [ -n "${{ github.event.inputs.date }}" ]; then
             TARGET="${{ github.event.inputs.date }}"
           else
@@ -71,3 +80,45 @@ jobs:
             ALL_OPT="--all"
           fi
           python scripts/predict_today.py $DATE_OPT $HOUR_OPT $ALL_OPT
+
+  daily_report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # 当日成績レポート: JST 22:00のスケジュール、または手動でreport=true
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.report == 'true') ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 13 * * *')
+
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 依存ライブラリインストール
+        run: pip install -r requirements.txt
+
+      - name: 当日結果をスクレイピング
+        run: |
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            TARGET="${{ github.event.inputs.date }}"
+          else
+            TARGET=$(TZ=Asia/Tokyo date '+%Y-%m-%d')
+          fi
+          echo "スクレイピング対象: ${TARGET}"
+          python scripts/scrape_day.py --date $TARGET || true
+
+      - name: 当日成績レポート & Discord投稿
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            TARGET="${{ github.event.inputs.date }}"
+          else
+            TARGET=$(TZ=Asia/Tokyo date '+%Y-%m-%d')
+          fi
+          python scripts/week_summary.py --from $TARGET --to $TARGET

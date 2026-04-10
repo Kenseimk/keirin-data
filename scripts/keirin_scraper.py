@@ -270,12 +270,18 @@ def parse_race(venue_slug, race_id):
                 return col
         return None
 
-    col_banum   = find_col(racecard_df, ["車 番"]) or find_col(racecard_df, ["車番"])
-    col_name    = find_col(racecard_df, ["選手名"])
-    col_class   = find_col(racecard_df, ["級 班"]) or find_col(racecard_df, ["級班"])
-    col_style   = find_col(racecard_df, ["脚 質"]) or find_col(racecard_df, ["脚質"])
-    col_gear    = find_col(racecard_df, ["ギヤ"])
-    col_score   = find_col(racecard_df, ["競走得点"])
+    col_banum     = find_col(racecard_df, ["車 番"]) or find_col(racecard_df, ["車番"])
+    col_name      = find_col(racecard_df, ["選手名"])
+    col_class     = find_col(racecard_df, ["級 班"]) or find_col(racecard_df, ["級班"])
+    col_style     = find_col(racecard_df, ["脚 質"]) or find_col(racecard_df, ["脚質"])
+    col_gear      = find_col(racecard_df, ["ギヤ"])
+    col_score     = find_col(racecard_df, ["競走得点"])
+    col_mark      = find_col(racecard_df, ["予 想"]) or find_col(racecard_df, ["予想"])
+    col_win_rate  = find_col(racecard_df, ["勝 率"]) or find_col(racecard_df, ["勝率"])
+    col_top2_rate = find_col(racecard_df, ["2連"])
+    col_top3_rate = find_col(racecard_df, ["3連"])
+    col_nige_4m   = find_col(racecard_df, ["直近", "逃"]) or find_col(racecard_df, ["4ヶ月", "逃"])
+    col_maku_4m   = find_col(racecard_df, ["直近", "捲"]) or find_col(racecard_df, ["4ヶ月", "捲"])
 
     # --- ライン情報（テーブルを番号でなく内容で特定）---
     lineup_text = ""
@@ -356,6 +362,8 @@ def parse_race(venue_slug, race_id):
     except Exception:
         pass
 
+    MARK_MAP = {"◎": 6, "○": 5, "△": 4, "▲": 3, "注": 2, "×": 1}
+
     # --- 選手単位のレコードに変換 ---
     rows = []
     for _, player in racecard_df.iterrows():
@@ -396,6 +404,14 @@ def parse_race(venue_slug, race_id):
             "running_style":str(player[col_style])  if col_style  else "",
             "gear":         str(player[col_gear])   if col_gear   else "",
             "race_score":   str(player[col_score])  if col_score  else "",
+            # 追加: 予想印・直近4ヶ月成績
+            "mark":         str(player[col_mark]).strip()     if col_mark      else "",
+            "mark_num":     MARK_MAP.get(str(player[col_mark]).strip(), 0) if col_mark else 0,
+            "win_rate_4m":  str(player[col_win_rate])         if col_win_rate  else "",
+            "top2_rate_4m": str(player[col_top2_rate])        if col_top2_rate else "",
+            "top3_rate_4m": str(player[col_top3_rate])        if col_top3_rate else "",
+            "nige_4m":      str(player[col_nige_4m])          if col_nige_4m   else "",
+            "maku_4m":      str(player[col_maku_4m])          if col_maku_4m   else "",
         }
 
         # 結果を結合
