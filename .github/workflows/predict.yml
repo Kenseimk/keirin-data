@@ -21,7 +21,7 @@ on:
       all_races:
         description: '全レース帯を投稿する (true/false)'
         required: false
-        default: 'false'
+        default: 'true'
       report:
         description: '当日成績レポートを投稿する (true/false)'
         required: false
