@@ -69,6 +69,24 @@ df_all[["san_combo", "san_payout"]] = df_all["san_ren_tan"].apply(
     lambda x: pd.Series(parse_payout(x))
 )
 
+def parse_wide_all(s):
+    """ワイド払戻文字列から {combo: payout} dictを返す (例: "1=2  350円 / 1=3  420円 / 2=3  280円")"""
+    if pd.isna(s) or str(s).strip() == "":
+        return {}
+    result = {}
+    for part in str(s).split("/"):
+        m = re.search(r"(\d+)=(\d+)\s+([\d,]+)円", part.strip())
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            key = (min(a, b), max(a, b))
+            result[key] = int(m.group(3).replace(",", ""))
+    return result
+
+if "wide" in df_all.columns:
+    df_all["wide_dict"] = df_all["wide"].apply(parse_wide_all)
+else:
+    df_all["wide_dict"] = [{}] * len(df_all)
+
 # ========== 選手トレンド特徴量（リークなし）==========
 CLASS_MAP = {"S1": 4, "S2": 3, "A1": 2, "A2": 1, "B": 0}
 STYLE_MAP  = {"逃": 5, "捲": 4, "両": 3, "差": 2, "追": 1, "マ": 0}
@@ -164,6 +182,7 @@ try:
         top_proba=("win_proba", lambda x: x.iloc[0]),
         ni_payout=("ni_payout", "first"),
         san_payout=("san_payout", "first"),
+        wide_dict=("wide_dict", "first"),
         top_score=("race_score", "max"),
         honmei_banum=("honmei_banum", "first"),
     ).reset_index()
@@ -202,6 +221,23 @@ try:
         (race_preds["pred_3rd"] == race_preds["actual_3rd"])
     ).astype(int)
 
+    # ワイド軸流し的中・払戻（軸=pred_1st、相手=pred_2nd/pred_3rd）
+    def get_wide_payout(row, a, b):
+        if a is None or b is None or not isinstance(row["wide_dict"], dict):
+            return 0
+        key = (min(int(a), int(b)), max(int(a), int(b)))
+        return row["wide_dict"].get(key, 0)
+
+    race_preds["wide_1_2_pay"] = race_preds.apply(
+        lambda r: get_wide_payout(r, r["pred_1st"], r["pred_2nd"]), axis=1)
+    race_preds["wide_1_3_pay"] = race_preds.apply(
+        lambda r: get_wide_payout(r, r["pred_1st"], r["pred_3rd"]), axis=1)
+    race_preds["wide_1_2_hit"] = (race_preds["wide_1_2_pay"] > 0).astype(int)
+    race_preds["wide_1_3_hit"] = (race_preds["wide_1_3_pay"] > 0).astype(int)
+    # 2点流し: 200円投資、どちらか(または両方)当たれば払戻合算
+    race_preds["wide_nagashi_pay"] = race_preds["wide_1_2_pay"] + race_preds["wide_1_3_pay"]
+    race_preds["wide_nagashi_hit"] = ((race_preds["wide_1_2_hit"]==1)|(race_preds["wide_1_3_hit"]==1)).astype(int)
+
     # ========== 全レース結果 ==========
     print(f"\n{'='*60}")
     print(f"  {TARGET_DATE} 全{len(race_preds)}レース 予測結果")
@@ -219,11 +255,24 @@ try:
     san_hits = race_preds["san_hit"].sum()
     ni_recovery  = race_preds[race_preds["ni_hit"]==1]["ni_payout"].sum() / (total * 100) * 100
     san_recovery = race_preds[race_preds["san_hit"]==1]["san_payout"].sum() / (total * 100) * 100
+    w12_hits = race_preds["wide_1_2_hit"].sum()
+    w13_hits = race_preds["wide_1_3_hit"].sum()
+    wn_hits  = race_preds["wide_nagashi_hit"].sum()
+    w12_rec  = race_preds["wide_1_2_pay"].sum() / (total * 100) * 100
+    w13_rec  = race_preds["wide_1_3_pay"].sum() / (total * 100) * 100
+    wn_rec   = race_preds["wide_nagashi_pay"].sum() / (total * 200) * 100
 
     print(f"\n{'='*60}")
     print(f"  【全レース賭け】")
     print(f"  二車連単  的中: {ni_hits}/{total}  ({ni_hits/total*100:.1f}%)  回収率: {ni_recovery:.1f}%")
     print(f"  三連勝単  的中: {san_hits}/{total}  ({san_hits/total*100:.1f}%)  回収率: {san_recovery:.1f}%")
+    has_wide = race_preds["wide_nagashi_pay"].sum() > 0
+    if has_wide:
+        print(f"  ワイド軸×2着(1点)  的中: {w12_hits}/{total}  ({w12_hits/total*100:.1f}%)  回収率: {w12_rec:.1f}%")
+        print(f"  ワイド軸×3着(1点)  的中: {w13_hits}/{total}  ({w13_hits/total*100:.1f}%)  回収率: {w13_rec:.1f}%")
+        print(f"  ワイド2点流し(200円) 的中: {wn_hits}/{total}  ({wn_hits/total*100:.1f}%)  回収率: {wn_rec:.1f}%")
+    else:
+        print(f"  ワイド: 払戻データなし（過去データは未収集）")
 
     # ========== フィルター戦略 ==========
     print(f"\n  【フィルター戦略: top_score>=95 & score_gap>=2 & 7車限定】")
@@ -235,10 +284,22 @@ try:
         (race_preds["n_players"] == 7)
     ]
     if len(filtered) > 0:
-        f_san_hits = filtered["san_hit"].sum()
-        f_san_rec  = filtered[filtered["san_hit"]==1]["san_payout"].sum() / (len(filtered) * 100) * 100
-        print(f"  対象レース: {len(filtered)}件")
-        print(f"  三連勝単  的中: {f_san_hits}/{len(filtered)}  ({f_san_hits/len(filtered)*100:.1f}%)  回収率: {f_san_rec:.1f}%")
+        f = filtered
+        ft = len(f)
+        f_san_hits = f["san_hit"].sum()
+        f_san_rec  = f[f["san_hit"]==1]["san_payout"].sum() / (ft * 100) * 100
+        print(f"  対象レース: {ft}件")
+        print(f"  三連勝単  的中: {f_san_hits}/{ft}  ({f_san_hits/ft*100:.1f}%)  回収率: {f_san_rec:.1f}%")
+        if has_wide:
+            fw12 = f["wide_1_2_hit"].sum()
+            fw13 = f["wide_1_3_hit"].sum()
+            fwn  = f["wide_nagashi_hit"].sum()
+            fw12_rec = f["wide_1_2_pay"].sum() / (ft * 100) * 100
+            fw13_rec = f["wide_1_3_pay"].sum() / (ft * 100) * 100
+            fwn_rec  = f["wide_nagashi_pay"].sum() / (ft * 200) * 100
+            print(f"  ワイド軸×2着(1点)  的中: {fw12}/{ft}  ({fw12/ft*100:.1f}%)  回収率: {fw12_rec:.1f}%")
+            print(f"  ワイド軸×3着(1点)  的中: {fw13}/{ft}  ({fw13/ft*100:.1f}%)  回収率: {fw13_rec:.1f}%")
+            print(f"  ワイド2点流し(200円) 的中: {fwn}/{ft}  ({fwn/ft*100:.1f}%)  回収率: {fwn_rec:.1f}%")
         print(f"\n  --- 対象レース詳細 ---")
         print(filtered[cols].to_string(index=False))
     else:
@@ -252,8 +313,12 @@ try:
         if len(sub) == 0: continue
         hits = sub["san_hit"].sum()
         rec  = sub[sub["san_hit"]==1]["san_payout"].sum() / (len(sub) * 100) * 100
-        rows_thr.append({"top_proba閾値": thr, "件数": len(sub), "的中": hits,
-                          "的中率(%)": round(hits/len(sub)*100, 1), "回収率(%)": round(rec, 1)})
+        row_d = {"top_proba閾値": thr, "件数": len(sub), "的中": hits,
+                 "的中率(%)": round(hits/len(sub)*100, 1), "三連単ROI(%)": round(rec, 1)}
+        if has_wide:
+            w_rec = sub["wide_nagashi_pay"].sum() / (len(sub) * 200) * 100
+            row_d["ワイド2点ROI(%)"] = round(w_rec, 1)
+        rows_thr.append(row_d)
     print(pd.DataFrame(rows_thr).to_string(index=False))
 
 except ImportError:

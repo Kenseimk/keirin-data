@@ -38,6 +38,21 @@ def parse_payout(s):
 df_all[["ni_combo","ni_payout"]]   = df_all["ni_sha_tan"].apply(lambda x: pd.Series(parse_payout(x)))
 df_all[["san_combo","san_payout"]] = df_all["san_ren_tan"].apply(lambda x: pd.Series(parse_payout(x)))
 
+def parse_wide_all(s):
+    if pd.isna(s) or str(s).strip() == "": return {}
+    result = {}
+    for part in str(s).split("/"):
+        m = re.search(r"(\d+)=(\d+)\s+([\d,]+)円", part.strip())
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            result[(min(a,b), max(a,b))] = int(m.group(3).replace(",", ""))
+    return result
+
+if "wide" in df_all.columns:
+    df_all["wide_dict"] = df_all["wide"].apply(parse_wide_all)
+else:
+    df_all["wide_dict"] = [{}] * len(df_all)
+
 CLASS_MAP = {"S1":4,"S2":3,"A1":2,"A2":1,"B":0}
 STYLE_MAP  = {"逃":5,"捲":4,"両":3,"差":2,"追":1,"マ":0}
 
@@ -125,6 +140,7 @@ for target_date in TARGET_DATES:
         top_proba=("win_proba", lambda x: x.iloc[0]),
         ni_payout=("ni_payout","first"),
         san_payout=("san_payout","first"),
+        wide_dict=("wide_dict","first"),
     ).reset_index()
 
     w1 = df_val[df_val["rank_num"]==1].groupby("race_id")["banum"].first()
@@ -147,28 +163,42 @@ for target_date in TARGET_DATES:
         (rp["pred_2nd"]==rp["actual_2nd"])
     ).astype(int)
 
+    def get_wide_pay(row, a, b):
+        if a is None or b is None or not isinstance(row["wide_dict"], dict): return 0
+        key = (min(int(a), int(b)), max(int(a), int(b)))
+        return row["wide_dict"].get(key, 0)
+
+    rp["wide_1_2_pay"] = rp.apply(lambda r: get_wide_pay(r, r["pred_1st"], r["pred_2nd"]), axis=1)
+    rp["wide_1_3_pay"] = rp.apply(lambda r: get_wide_pay(r, r["pred_1st"], r["pred_3rd"]), axis=1)
+    rp["wide_nag_pay"] = rp["wide_1_2_pay"] + rp["wide_1_3_pay"]
+    rp["wide_nag_hit"] = ((rp["wide_1_2_pay"]>0)|(rp["wide_1_3_pay"]>0)).astype(int)
+
     total = len(rp)
     san_hits = rp["san_hit"].sum()
     san_rec  = rp[rp["san_hit"]==1]["san_payout"].sum()/(total*100)*100 if total>0 else 0
+    wn_rec   = rp["wide_nag_pay"].sum()/(total*200)*100 if total>0 else 0
 
     # フィルター適用
     f = rp[(rp["top_score"]>=95)&(rp["score_gap"]>=2)&(rp["n_players"]==7)]
     f_hits = f["san_hit"].sum()
     f_rec  = f[f["san_hit"]==1]["san_payout"].sum()/(len(f)*100)*100 if len(f)>0 else 0
+    fw_rec = f["wide_nag_pay"].sum()/(len(f)*200)*100 if len(f)>0 else 0
 
     all_results.append({
         "日付": target_date,
         "全レース": total,
         "三連単的中": san_hits,
         "的中率(%)": round(san_hits/total*100,1) if total>0 else 0,
-        "回収率(%)": round(san_rec,1),
+        "三連単ROI(%)": round(san_rec,1),
+        "ワイド2点ROI(%)": round(wn_rec,1),
     })
     filter_results.append({
         "日付": target_date,
         "対象": len(f),
         "的中": f_hits,
         "的中率(%)": round(f_hits/len(f)*100,1) if len(f)>0 else 0,
-        "回収率(%)": round(f_rec,1),
+        "三連単ROI(%)": round(f_rec,1),
+        "ワイド2点ROI(%)": round(fw_rec,1),
         "的中レース": ", ".join([
             f"{row['venue']} {int(row['race_no'])}R "
             f"{int(row['pred_1st'])}-{int(row['pred_2nd']) if pd.notna(row['pred_2nd']) else '?'}"
@@ -199,37 +229,19 @@ print("  【フィルター: top_score>=95 & score_gap>=2 & 7車限定】")
 print(f"{'='*65}")
 df_f_res = pd.DataFrame(filter_results)
 print(df_f_res.to_string(index=False))
-f_total  = df_f_res["対象"].sum()
-f_hits   = df_f_res["的中"].sum()
-f_payout = 0
-for target_date in TARGET_DATES:
-    df_val = df_model[df_model["date"]==target_date].copy()
-    if df_val.empty: continue
-    df_val["win_proba"] = model.predict_proba(df_val[FEATURES].values)[:,1]
-    ds = df_val.sort_values(["race_id","win_proba"],ascending=[True,False])
-    rp2 = ds.groupby("race_id").agg(
-        pred_1st=("banum",lambda x:int(x.iloc[0])),
-        pred_2nd=("banum",lambda x:int(x.iloc[1]) if len(x)>1 else None),
-        pred_3rd=("banum",lambda x:int(x.iloc[2]) if len(x)>2 else None),
-        san_payout=("san_payout","first"),
-        top_proba=("win_proba",lambda x:x.iloc[0]),
-    ).reset_index()
-    rp2["score_gap"] = rp2["race_id"].map(score_gap_raw)
-    rp2["top_score"] = rp2["race_id"].map(top_score_raw)
-    rp2["n_players"] = rp2["race_id"].map(n_players_raw)
-    w1=df_val[df_val["rank_num"]==1].groupby("race_id")["banum"].first()
-    w2=df_val[df_val["rank_num"]==2].groupby("race_id")["banum"].first()
-    w3=df_val[df_val["rank_num"]==3].groupby("race_id")["banum"].first()
-    rp2["actual_1st"]=rp2["race_id"].map(w1)
-    rp2["actual_2nd"]=rp2["race_id"].map(w2)
-    rp2["actual_3rd"]=rp2["race_id"].map(w3)
-    rp2["san_hit"]=(
-        (rp2["pred_1st"]==rp2["actual_1st"])&
-        (rp2["pred_2nd"]==rp2["actual_2nd"])&
-        (rp2["pred_3rd"]==rp2["actual_3rd"])
-    ).astype(int)
-    f2=rp2[(rp2["top_score"]>=95)&(rp2["score_gap"]>=2)&(rp2["n_players"]==7)]
-    f_payout += f2[f2["san_hit"]==1]["san_payout"].sum()
-
-f_rec_total = f_payout/(f_total*100)*100 if f_total>0 else 0
-print(f"\n  週計: {f_total}件賭け / 的中{f_hits}件 / 的中率{f_hits/f_total*100:.1f}% / 回収率{f_rec_total:.1f}%" if f_total>0 else "\n  週計: 対象レースなし")
+f_total = df_f_res["対象"].sum()
+f_hits  = df_f_res["的中"].sum()
+if f_total > 0:
+    # 三連単週計ROI
+    f_san_roi = (df_f_res["三連単ROI(%)"] * df_f_res["対象"]).sum() / f_total
+    f_wide_roi = (df_f_res["ワイド2点ROI(%)"] * df_f_res["対象"]).sum() / f_total
+    has_wide_data = df_f_res["ワイド2点ROI(%)"].sum() > 0
+    msg = (f"\n  週計: {f_total}件賭け / 的中{f_hits}件 / 的中率{f_hits/f_total*100:.1f}%"
+           f" / 三連単ROI:{f_san_roi:.1f}%")
+    if has_wide_data:
+        msg += f" / ワイド2点ROI:{f_wide_roi:.1f}%"
+    else:
+        msg += " / ワイド: 払戻データなし（過去データは未収集）"
+    print(msg)
+else:
+    print("\n  週計: 対象レースなし")

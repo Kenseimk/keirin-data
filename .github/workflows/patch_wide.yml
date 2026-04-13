@@ -1,0 +1,165 @@
+name: ワイド払戻データ遡及補完
+
+# 手動トリガー or 前回ジョブから自動カスケード
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: '処理する年 (例: 2022 / 空白=全年)'
+        required: false
+        default: ''
+      resume:
+        description: 'チェックポイントから再開 (true推奨)'
+        required: false
+        default: 'true'
+      cascade:
+        description: '残りがあれば自動で次のRunを起動 (true/false)'
+        required: false
+        default: 'true'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # 6時間制限に対して10分バッファ
+
+    steps:
+      # ── 1. チェックアウト ──────────────────────────────────────
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # 毎回最新状態を取得（前回Runのコミットを受け取る）
+          fetch-depth: 1
+
+      # ── 2. Python ─────────────────────────────────────────────
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 依存ライブラリインストール
+        run: pip install requests beautifulsoup4 pandas tqdm lxml html5lib lightgbm
+
+      # ── 3. チェックポイント復元 ────────────────────────────────
+      # キーを固定にすることで全Runが同じキャッシュを共有・上書きしていく
+      - name: チェックポイントをキャッシュから復元
+        uses: actions/cache@v4
+        with:
+          path: keirin_data/checkpoints/patch_wide_done.txt
+          key: patch-wide-ckpt-${{ github.event.inputs.year || 'all' }}
+          restore-keys: |
+            patch-wide-ckpt-${{ github.event.inputs.year || 'all' }}
+            patch-wide-ckpt-
+
+      # ── 4. パッチ実行 ──────────────────────────────────────────
+      - name: ワイド払戻パッチ実行
+        id: patch_run
+        run: |
+          YEAR="${{ github.event.inputs.year }}"
+          RESUME="${{ github.event.inputs.resume }}"
+
+          ARGS=""
+          if [ -n "$YEAR" ]; then
+            ARGS="--year $YEAR"
+          fi
+          if [ "$RESUME" = "true" ]; then
+            ARGS="$ARGS --resume"
+          fi
+
+          # GitHub Actionsの350分制限に対して325分で安全終了
+          ARGS="$ARGS --max_runtime_minutes 325"
+
+          echo "実行: python scripts/patch_wide.py $ARGS"
+          python scripts/patch_wide.py $ARGS
+
+          # ステータスファイルから出力を設定
+          if [ -f patch_wide_status.txt ]; then
+            while IFS='=' read -r key val; do
+              echo "${key}=${val}" >> $GITHUB_OUTPUT
+            done < patch_wide_status.txt
+            cat patch_wide_status.txt
+          fi
+
+      # ── 5. チェックポイントをキャッシュに保存 ──────────────────
+      - name: チェックポイントを保存
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: keirin_data/checkpoints/patch_wide_done.txt
+          key: patch-wide-ckpt-${{ github.event.inputs.year || 'all' }}-${{ github.run_id }}
+
+      # ── 6. CSVをコミット＆プッシュ ────────────────────────────
+      - name: CSVをGitにコミット＆プッシュ
+        if: always()
+        id: git_push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # チェックポイントファイルも追加
+          git add keirin_data/
+
+          if git diff --cached --quiet; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "変更なし。スキップします。"
+          else
+            YEAR="${{ github.event.inputs.year }}"
+            LABEL="${YEAR:-全年}"
+            UPDATED="${{ steps.patch_run.outputs.updated || '?' }}"
+            REMAINING="${{ steps.patch_run.outputs.remaining || '?' }}"
+            git commit -m "data: ワイド払戻遡及補完 ${LABEL} (+${UPDATED}件 残${REMAINING}件)"
+            for i in 1 2 3 4 5; do
+              git pull --rebase && git push && break
+              echo "Push失敗 (試行${i}/5)、15秒後リトライ..."
+              sleep 15
+            done
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+
+      # ── 7. 残りがあれば自動カスケード ────────────────────────
+      - name: 残り処理を自動起動
+        if: |
+          steps.patch_run.outputs.remaining != '0' &&
+          steps.patch_run.outputs.remaining != '' &&
+          github.event.inputs.cascade == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REMAINING="${{ steps.patch_run.outputs.remaining }}"
+          YEAR="${{ github.event.inputs.year }}"
+          echo "残り ${REMAINING} race_id → 次のRunを自動起動します"
+
+          # 次のRunは必ず resume=true で起動
+          gh workflow run patch_wide.yml \
+            --repo $GITHUB_REPOSITORY \
+            --field year="${YEAR}" \
+            --field resume=true \
+            --field cascade=true
+
+          echo "次のRunを起動しました"
+
+      # ── 8. 完了サマリー ────────────────────────────────────────
+      - name: サマリー出力
+        if: always()
+        run: |
+          echo "## ワイドパッチ結果" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f patch_wide_status.txt ]; then
+            echo "| 項目 | 値 |" >> $GITHUB_STEP_SUMMARY
+            echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+            while IFS='=' read -r key val; do
+              echo "| ${key} | ${val} |" >> $GITHUB_STEP_SUMMARY
+            done < patch_wide_status.txt
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          REMAINING="${{ steps.patch_run.outputs.remaining }}"
+          if [ "$REMAINING" = "0" ]; then
+            echo "全データの補完が完了しました！" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "残り ${REMAINING} race_id → cascade=true の場合は次のRunが自動起動します" >> $GITHUB_STEP_SUMMARY
+          fi

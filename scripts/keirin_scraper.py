@@ -368,14 +368,16 @@ def parse_race(venue_slug, race_id):
     except Exception:
         pass
 
-    # --- 払戻金テーブル（正規化マッチで特定・二車連単・三連勝単・三連複を構造化取得）---
+    # --- 払戻金テーブル（正規化マッチで特定・二車連単・三連勝単・三連複・ワイドを構造化取得）---
     ni_sha_tan  = ""
     san_ren_tan = ""
     san_ren_fuku = ""
+    wide_list = []
     try:
         for t in tables:
             t_str_norm = t.to_string().replace(" ", "").replace("\u3000", "")
-            if "車連単" not in t_str_norm and "連勝単" not in t_str_norm and "連複" not in t_str_norm:
+            if ("車連単" not in t_str_norm and "連勝単" not in t_str_norm
+                    and "連複" not in t_str_norm and "ワイド" not in t_str_norm):
                 continue
             for row_vals_raw in t.values:
                 vals_norm = [str(v).replace(" ", "").replace("\u3000", "") for v in row_vals_raw]
@@ -393,9 +395,16 @@ def parse_race(venue_slug, race_id):
                         nxt  = vals_orig[j + 1].strip() if j + 1 < len(vals_orig) else ""
                         if "連勝" in prev and not san_ren_fuku:
                             san_ren_fuku = nxt
+                    # ワイド: "ワイド" 単独セル or "ワイ"+"ド" 分割セルに対応
+                    is_wide = (v == "ワイド") or (v == "ド" and j > 0 and "ワイ" in vals_norm[j - 1])
+                    if is_wide and j + 1 < len(vals_orig):
+                        nxt = vals_orig[j + 1].strip()
+                        if nxt and nxt not in ("nan", "NaN"):
+                            wide_list.append(nxt)
             break
     except Exception:
         pass
+    wide = " / ".join(wide_list) if wide_list else ""
 
     MARK_MAP = {"◎": 6, "○": 5, "△": 4, "▲": 3, "注": 2, "×": 1}
 
@@ -429,6 +438,7 @@ def parse_race(venue_slug, race_id):
             "ni_sha_tan":   ni_sha_tan,
             "san_ren_tan":  san_ren_tan,
             "san_ren_fuku": san_ren_fuku,
+            "wide":         wide,
             # 選手情報
             "banum":        banum,
             "player_name":  name,
