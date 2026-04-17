@@ -85,6 +85,7 @@ df_all["style_num"]     = df_all["running_style"].map(STYLE_MAP).fillna(2)
 df_all["race_score"]    = pd.to_numeric(df_all["race_score"], errors="coerce")
 df_all["gear"]          = pd.to_numeric(df_all["gear"], errors="coerce")
 df_all["banum"]         = pd.to_numeric(df_all["banum"], errors="coerce")
+df_all["agari"]         = pd.to_numeric(df_all["agari"], errors="coerce")
 df_all["is_win"]        = (df_all["rank_num"]==1).astype(float)
 df_all["is_winner"]     = (df_all["rank_num"]==1).astype(int)
 df_all["is_2nd"]        = (df_all["rank_num"]==2).astype(int)
@@ -110,6 +111,11 @@ df_all["days_since_last"]= (
     pd.to_datetime(df_all.groupby("player_key")["date"].shift(1))
 ).dt.days
 
+# 上がりタイム直近平均（走力の直接指標）
+agari_grp = df_all.groupby("player_key")["agari"]
+df_all["last3_avg_agari"] = agari_grp.transform(lambda x: x.shift(1).rolling(3,min_periods=1).mean())
+df_all["last5_avg_agari"] = agari_grp.transform(lambda x: x.shift(1).rolling(5,min_periods=1).mean())
+
 def extract_honmei(x):
     if pd.isna(x): return None
     m = re.search(r"◎(\d+)", str(x))
@@ -121,10 +127,32 @@ df_all["is_winner"]    = (df_all["rank_num"]==1).astype(int)
 n_pl = df_all.groupby("race_id")["banum"].count().rename("n_players_in_race")
 df_all = df_all.join(n_pl, on="race_id")
 
+# ライン特徴量: 同一レース内の同地区選手数・同期選手数
+pref_count = df_all.groupby(["race_id","pref"])["banum"].transform("count")
+term_count = df_all.groupby(["race_id","term"])["banum"].transform("count")
+df_all["same_pref_count"] = (pref_count - 1).clip(lower=0)  # 自分を除く
+df_all["same_term_count"] = (term_count - 1).clip(lower=0)
+
+# 脚質バランス: レース内の逃げ選手数（多いと展開が荒れる）
+nige_in_race = df_all.groupby("race_id")["running_style"].transform(
+    lambda x: (x == "逃").sum()
+)
+df_all["nige_in_race"] = nige_in_race
+
+# 会場×選手の直近勝率（地元開催バイアス）
+df_all_sorted = df_all.sort_values(["player_key","date","race_no"])
+venue_win = df_all_sorted.groupby(["player_key","venue_slug"])["is_win"].transform(
+    lambda x: x.shift(1).rolling(10,min_periods=1).mean()
+)
+df_all["venue_win_rate"] = venue_win
+
 FEATURES_BASE = ["race_score","class_num","style_num","gear",
                  "score_rank","is_honmei","n_players_in_race",
                  "prev1_rank","last3_avg_rank","last5_avg_rank",
-                 "last5_win_rate","rank_trend","days_since_last"]
+                 "last5_win_rate","rank_trend","days_since_last",
+                 "last3_avg_agari","last5_avg_agari",
+                 "same_pref_count","same_term_count",
+                 "nige_in_race","venue_win_rate"]
 # 直近4ヶ月成績（新規スクレイピング分のみ存在、旧データはNaN→LGBMがNaN対応）
 FEATURES_NEW  = ["mark_num","win_rate_4m","top2_rate_4m","top3_rate_4m",
                  "nige_4m","maku_4m"]
@@ -219,10 +247,12 @@ rp["top_score"] = rp["race_id"].map(top_score_raw)
 rp["n_players"] = rp["race_id"].map(n_players_raw)
 
 # ========== フィルター & 時間帯絞り込み ==========
+# top_proba>=0.35 を追加: 検証で的中率6.7%・回収率109%（0.40で7.3%・108%）
 filtered = rp[
     (rp["top_score"] >= 95) &
     (rp["score_gap"] >= 2) &
     (rp["n_players"] == 7) &
+    (rp["top_proba"] >= 0.35) &
     (rp["race_no"] >= RACE_RANGE[0]) &
     (rp["race_no"] <= RACE_RANGE[1])
 ].sort_values(["venue","race_no"])
@@ -237,18 +267,19 @@ if filtered.empty:
     print("対象レースなし")
 else:
     lines = [f"**:checkered_flag: {TARGET_DATE} 競輪予想 ({HOUR_JST}時台)**",
-             f"フィルター: top_score≥95 & gap≥2 & 7車限定",
+             f"フィルター: top_score≥95 & gap≥2 & proba≥0.35 & 7車限定",
              f"対象: {len(filtered)}レース\n"]
 
     for _, row in filtered.iterrows():
         p2 = int(row["pred_2nd"]) if pd.notna(row["pred_2nd"]) else "?"
         p3 = int(row["pred_3rd"]) if pd.notna(row["pred_3rd"]) else "?"
         ct = row.get("close_time", "")
-        time_str = f"  締切: {ct}" if ct else ""
+        time_str = f"  締切: {ct}" if ct and str(ct) != "nan" else ""
+        proba_str = f"{row['top_proba']:.2f}"
         lines.append(
             f":round_pushpin: **{row['venue']} {int(row['race_no'])}R**{time_str}\n"
             f"  予想: `{int(row['pred_1st'])}-{p2}-{p3}`\n"
-            f"  top_score: {row['top_score']:.1f} / gap: {row['score_gap']:.1f}"
+            f"  top_score: {row['top_score']:.1f} / gap: {row['score_gap']:.1f} / proba: {proba_str}"
         )
 
     msg = "\n".join(lines)
