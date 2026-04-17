@@ -247,12 +247,11 @@ rp["top_score"] = rp["race_id"].map(top_score_raw)
 rp["n_players"] = rp["race_id"].map(n_players_raw)
 
 # ========== フィルター & 時間帯絞り込み ==========
-# top_proba>=0.35 を追加: 検証で的中率6.7%・回収率109%（0.40で7.3%・108%）
+# proba>=0.35は的中率が上がるがオッズが低くなり回収率92%に落ちるため除外
 filtered = rp[
     (rp["top_score"] >= 95) &
     (rp["score_gap"] >= 2) &
     (rp["n_players"] == 7) &
-    (rp["top_proba"] >= 0.35) &
     (rp["race_no"] >= RACE_RANGE[0]) &
     (rp["race_no"] <= RACE_RANGE[1])
 ].sort_values(["venue","race_no"])
@@ -267,7 +266,7 @@ if filtered.empty:
     print("対象レースなし")
 else:
     lines = [f"**:checkered_flag: {TARGET_DATE} 競輪予想 ({HOUR_JST}時台)**",
-             f"フィルター: top_score≥95 & gap≥2 & proba≥0.35 & 7車限定",
+             f"フィルター: top_score≥95 & gap≥2 & 7車限定",
              f"対象: {len(filtered)}レース\n"]
 
     for _, row in filtered.iterrows():
