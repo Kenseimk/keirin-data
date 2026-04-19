@@ -2,20 +2,16 @@ name: 競輪予想 Discord投稿
 
 on:
   schedule:
-    # 予想投稿: JST 8:00 / 12:00 / 19:00 (UTC 23:00前日 / 03:00 / 10:00)
+    # JST 8:00 スクレイピング (UTC 23:00前日)
     - cron: '0 23 * * *'
-    - cron: '0 3 * * *'
-    - cron: '0 10 * * *'
+    # JST 8:30 予想投稿 (UTC 23:30前日)
+    - cron: '30 23 * * *'
     # 当日成績レポート: JST 22:00 (UTC 13:00)
     - cron: '0 13 * * *'
   workflow_dispatch:
     inputs:
       date:
         description: '対象日 (例: 2026-03-31)。空白で今日'
-        required: false
-        default: ''
-      hour:
-        description: 'JST時刻 (例: 10)。空白で現在時刻'
         required: false
         default: ''
       all_races:
@@ -31,15 +27,12 @@ permissions:
   contents: read
 
 jobs:
-  predict:
+  scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # 予想投稿: JST 10/12/14/16時のスケジュール、または手動でreport=false
+    # JST 8:00 スクレイピングのみ
     if: |
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.report != 'true') ||
-      (github.event_name == 'schedule' && github.event.schedule != '0 13 * * *')
-    # 予想投稿: UTC 23:00(JST8時) / 03:00(JST12時) / 10:00(JST19時)
-
+      github.event.schedule == '0 23 * * *'
     steps:
       - name: リポジトリをチェックアウト
         uses: actions/checkout@v4
@@ -55,6 +48,33 @@ jobs:
 
       - name: 当日データをスクレイピング
         run: |
+          TARGET=$(TZ=Asia/Tokyo date '+%Y-%m-%d')
+          echo "スクレイピング対象: ${TARGET}"
+          python scripts/scrape_day.py --date $TARGET || true
+
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # JST 8:30 予想投稿、または手動でreport=false
+    if: |
+      github.event.schedule == '30 23 * * *' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.report != 'true')
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 依存ライブラリインストール
+        run: pip install -r requirements.txt
+
+      - name: 当日データをスクレイピング（手動実行時のみ）
+        if: github.event_name == 'workflow_dispatch'
+        run: |
           if [ -n "${{ github.event.inputs.date }}" ]; then
             TARGET="${{ github.event.inputs.date }}"
           else
@@ -68,27 +88,22 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           DATE_OPT=""
-          HOUR_OPT=""
-          ALL_OPT=""
+          ALL_OPT="--all"
           if [ -n "${{ github.event.inputs.date }}" ]; then
             DATE_OPT="--date ${{ github.event.inputs.date }}"
           fi
-          if [ -n "${{ github.event.inputs.hour }}" ]; then
-            HOUR_OPT="--hour ${{ github.event.inputs.hour }}"
+          if [ "${{ github.event.inputs.all_races }}" = "false" ]; then
+            ALL_OPT=""
           fi
-          if [ "${{ github.event.inputs.all_races }}" = "true" ]; then
-            ALL_OPT="--all"
-          fi
-          python scripts/predict_today.py $DATE_OPT $HOUR_OPT $ALL_OPT
+          python scripts/predict_today.py $DATE_OPT $ALL_OPT
 
   daily_report:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # 当日成績レポート: JST 22:00のスケジュール、または手動でreport=true
     if: |
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.report == 'true') ||
-      (github.event_name == 'schedule' && github.event.schedule == '0 13 * * *')
-
+      github.event.schedule == '0 13 * * *' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.report == 'true')
     steps:
       - name: リポジトリをチェックアウト
         uses: actions/checkout@v4
