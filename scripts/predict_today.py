@@ -87,7 +87,7 @@ df_all["style_num"]     = df_all["running_style"].map(STYLE_MAP).fillna(2)
 df_all["race_score"]    = pd.to_numeric(df_all["race_score"], errors="coerce")
 df_all["gear"]          = pd.to_numeric(df_all["gear"], errors="coerce")
 df_all["banum"]         = pd.to_numeric(df_all["banum"], errors="coerce")
-df_all["agari"]         = pd.to_numeric(df_all["agari"], errors="coerce")
+
 df_all["is_win"]        = (df_all["rank_num"]==1).astype(float)
 df_all["is_winner"]     = (df_all["rank_num"]==1).astype(int)
 df_all["is_2nd"]        = (df_all["rank_num"]==2).astype(int)
@@ -113,11 +113,6 @@ df_all["days_since_last"]= (
     pd.to_datetime(df_all.groupby("player_key")["date"].shift(1))
 ).dt.days
 
-# 上がりタイム直近平均（走力の直接指標）
-agari_grp = df_all.groupby("player_key")["agari"]
-df_all["last3_avg_agari"] = agari_grp.transform(lambda x: x.shift(1).rolling(3,min_periods=1).mean())
-df_all["last5_avg_agari"] = agari_grp.transform(lambda x: x.shift(1).rolling(5,min_periods=1).mean())
-
 def extract_honmei(x):
     if pd.isna(x): return None
     m = re.search(r"◎(\d+)", str(x))
@@ -129,48 +124,14 @@ df_all["is_winner"]    = (df_all["rank_num"]==1).astype(int)
 n_pl = df_all.groupby("race_id")["banum"].count().rename("n_players_in_race")
 df_all = df_all.join(n_pl, on="race_id")
 
-# ライン特徴量: 同一レース内の同地区選手数・同期選手数
-pref_count = df_all.groupby(["race_id","pref"])["banum"].transform("count")
-term_count = df_all.groupby(["race_id","term"])["banum"].transform("count")
-df_all["same_pref_count"] = (pref_count - 1).clip(lower=0)  # 自分を除く
-df_all["same_term_count"] = (term_count - 1).clip(lower=0)
-
-# 脚質バランス: レース内の逃げ選手数（多いと展開が荒れる）
-nige_in_race = df_all.groupby("race_id")["running_style"].transform(
-    lambda x: (x == "逃").sum()
-)
-df_all["nige_in_race"] = nige_in_race
-
-# 会場×選手の直近勝率（地元開催バイアス）
-df_all_sorted = df_all.sort_values(["player_key","date","race_no"])
-venue_win = df_all_sorted.groupby(["player_key","venue_slug"])["is_win"].transform(
-    lambda x: x.shift(1).rolling(10,min_periods=1).mean()
-)
-df_all["venue_win_rate"] = venue_win
-
-# 条件付き特徴量: 本命選手（◎）の脚質と競走得点をレース全選手に付与
-# → model2/3が「1着になりやすい選手の脚質」を条件として学習できる
-honmei_style = df_all[df_all["is_honmei"]==1].set_index("race_id")["style_num"]
-honmei_score = df_all[df_all["is_honmei"]==1].set_index("race_id")["race_score"]
-df_all["honmei_style_num"]   = df_all["race_id"].map(honmei_style)
-df_all["honmei_race_score"]  = df_all["race_id"].map(honmei_score)
-
 FEATURES_BASE = ["race_score","class_num","style_num","gear",
                  "score_rank","is_honmei","n_players_in_race",
                  "prev1_rank","last3_avg_rank","last5_avg_rank",
-                 "last5_win_rate","rank_trend","days_since_last",
-                 "last3_avg_agari","last5_avg_agari",
-                 "same_pref_count","same_term_count",
-                 "nige_in_race","venue_win_rate"]
+                 "last5_win_rate","rank_trend","days_since_last"]
 # 直近4ヶ月成績（新規スクレイピング分のみ存在、旧データはNaN→LGBMがNaN対応）
 FEATURES_NEW  = ["mark_num","win_rate_4m","top2_rate_4m","top3_rate_4m",
                  "nige_4m","maku_4m"]
-# 条件付き特徴量: 1着本命の脚質・得点（model2/3専用）
-FEATURES_COND = ["honmei_style_num","honmei_race_score"]
-
-FEATURES      = FEATURES_BASE + FEATURES_NEW
-FEATURES_2ND  = FEATURES_BASE + FEATURES_NEW + FEATURES_COND
-FEATURES_3RD  = FEATURES_BASE + FEATURES_NEW + FEATURES_COND
+FEATURES = FEATURES_BASE + FEATURES_NEW
 
 # score_gap・top_score・n_players をdf_allから計算（バグ修正済み）
 def calc_gap(x):
@@ -213,13 +174,11 @@ def fit_es(params, X_tr, y_tr, X_val, y_val):
                      lgb.log_evaluation(-1)])
     return m
 
-X_tr    = df_tr[FEATURES].values
-X_val_f = df_val[FEATURES].values
-X_tr2   = df_tr[FEATURES_2ND].values
-X_val2  = df_val[FEATURES_2ND].values
-model  = fit_es(LGB_PARAMS, X_tr,  df_tr["is_winner"].values, X_val_f, df_val["is_winner"].values)
-model2 = fit_es(LGB_PARAMS, X_tr2, df_tr["is_2nd"].values,    X_val2,  df_val["is_2nd"].values)
-model3 = fit_es(LGB_PARAMS, X_tr2, df_tr["is_3rd"].values,    X_val2,  df_val["is_3rd"].values)
+X_tr  = df_tr[FEATURES].values
+X_val = df_val[FEATURES].values
+model  = fit_es(LGB_PARAMS, X_tr, df_tr["is_winner"].values, X_val, df_val["is_winner"].values)
+model2 = fit_es(LGB_PARAMS, X_tr, df_tr["is_2nd"].values,    X_val, df_val["is_2nd"].values)
+model3 = fit_es(LGB_PARAMS, X_tr, df_tr["is_3rd"].values,    X_val, df_val["is_3rd"].values)
 print(f"  best iterations: 1着={model.best_iteration_} / 2着={model2.best_iteration_} / 3着={model3.best_iteration_}")
 
 # ========== 当日データ（未完走レースもrank_numなしで予測対象にする） ==========
@@ -231,8 +190,8 @@ if df_today.empty:
     sys.exit(0)
 
 df_today["win_proba"] = model.predict_proba( df_today[FEATURES].values)[:, 1]
-df_today["p2_proba"]  = model2.predict_proba(df_today[FEATURES_2ND].values)[:, 1]
-df_today["p3_proba"]  = model3.predict_proba(df_today[FEATURES_3RD].values)[:, 1]
+df_today["p2_proba"]  = model2.predict_proba(df_today[FEATURES].values)[:, 1]
+df_today["p3_proba"]  = model3.predict_proba(df_today[FEATURES].values)[:, 1]
 
 rows = []
 for race_id, grp_r in df_today.groupby("race_id"):
