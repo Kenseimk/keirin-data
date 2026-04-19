@@ -243,12 +243,14 @@ for race_id, grp_r in df_today.groupby("race_id"):
     top_proba = float(grp_r.iloc[0]["win_proba"])
     close_time = grp_r["close_time"].iloc[0] if "close_time" in grp_r.columns else ""
 
-    # フォーメーション: 2着を上位2候補取得
+    # 2着候補を上位2名取得
     rest2 = grp_r[grp_r["banum"] != pred_1].sort_values("p2_proba", ascending=False)
-    pred_2a = int(rest2.iloc[0]["banum"]) if len(rest2) >= 1 else None
-    pred_2b = int(rest2.iloc[1]["banum"]) if len(rest2) >= 2 else None
+    pred_2a    = int(rest2.iloc[0]["banum"])   if len(rest2) >= 1 else None
+    pred_2b    = int(rest2.iloc[1]["banum"])   if len(rest2) >= 2 else None
+    p2_gap     = float(rest2.iloc[0]["p2_proba"] - rest2.iloc[1]["p2_proba"]) if len(rest2) >= 2 else 1.0
+    # gap<0.05=接戦→2通り展開、gap>=0.05=確信度高→1通りに絞る
+    use_formation = (p2_gap < 0.05) and (pred_2b is not None)
 
-    # 各2着候補に対して3着を決定
     def pick_3rd(exclude_banums):
         rest3 = grp_r[~grp_r["banum"].isin(exclude_banums)].sort_values("p3_proba", ascending=False)
         return int(rest3.iloc[0]["banum"]) if len(rest3) >= 1 else None
@@ -258,9 +260,10 @@ for race_id, grp_r in df_today.groupby("race_id"):
 
     base = {"race_id": race_id, "venue": grp_r["venue_slug"].iloc[0],
             "date": grp_r["date"].iloc[0], "race_no": grp_r["race_no"].iloc[0],
-            "pred_1st": pred_1, "top_proba": top_proba, "close_time": close_time}
+            "pred_1st": pred_1, "top_proba": top_proba, "p2_gap": p2_gap,
+            "close_time": close_time}
     rows.append({**base, "pred_2nd": pred_2a, "pred_3rd": pred_3a, "formation": "A"})
-    if pred_2b:
+    if use_formation:
         rows.append({**base, "pred_2nd": pred_2b, "pred_3rd": pred_3b, "formation": "B"})
 
 rp = pd.DataFrame(rows)
@@ -368,10 +371,13 @@ else:
             p3 = int(r["pred_3rd"]) if pd.notna(r["pred_3rd"]) else "?"
             combos.append(f"`{int(r['pred_1st'])}-{p2}-{p3}`")
         combo_str = "  /  ".join(combos)
+        n_combos  = len(race_rows)
+        p2gap     = float(row["p2_gap"]) if "p2_gap" in row and pd.notna(row["p2_gap"]) else 0
+        formation_label = f"{'接戦→2通り' if n_combos > 1 else '確信→1通り'} (p2gap:{p2gap:.3f})"
 
         lines.append(
             f":round_pushpin: **{row['venue']} {int(row['race_no'])}R**{time_str}\n"
-            f"  予想: {combo_str}\n"
+            f"  予想: {combo_str}  [{formation_label}]\n"
             f"  score: {row['top_score']:.1f} / gap: {row['score_gap']:.1f}\n"
             f"  平均払戻: {avg_pay:,}円 / 損益分岐: {breakeven:,}円 / 期待値: {ev_sign}{ev_per_bet - 100:,}円"
         )
