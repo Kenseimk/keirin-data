@@ -34,8 +34,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--date", default=None, help="対象日 (例: 2026-03-31)。省略時は今日")
 parser.add_argument("--hour", type=int, default=None, help="実行時刻(JST時)。省略時は現在時刻")
 parser.add_argument("--all",  action="store_true", help="全レース帯を投稿（テスト用）")
-parser.add_argument("--min_payout", type=int, default=0,
-                    help="期待払戻の下限(円)。同スコア帯・ギャップ帯の過去平均払戻がこれ未満のレースを除外 (例: 3000)")
+parser.add_argument("--min_ev", type=float, default=0.0,
+                    help="期待値フィルター(円)。top_proba×過去平均払戻がこれ未満のレースを除外 (例: 500 → 期待収支+500円以上)")
 args = parser.parse_args()
 
 now_jst     = datetime.now(JST)
@@ -293,14 +293,17 @@ rp = rp.merge(payout_table, on=["score_band","gap_band"], how="left")
 overall_avg = race_pay_filtered["_pay"].mean()
 rp["avg_payout"] = rp["avg_payout"].fillna(overall_avg)
 
+# 期待値 = top_proba × 過去平均払戻（損益分岐は100円=購入額）
+rp["expected_value"] = rp["top_proba"] * rp["avg_payout"]
+
 # ========== フィルター & 時間帯絞り込み ==========
 # proba>=0.35は的中率が上がるがオッズが低くなり回収率92%に落ちるため除外
-MIN_PAYOUT = args.min_payout
+MIN_EV = args.min_ev
 filtered = rp[
     (rp["top_score"] >= 95) &
     (rp["score_gap"] >= 2) &
     (rp["n_players"] == 7) &
-    (rp["avg_payout"] >= MIN_PAYOUT) &
+    (rp["expected_value"] >= MIN_EV) &
     (rp["race_no"] >= RACE_RANGE[0]) &
     (rp["race_no"] <= RACE_RANGE[1])
 ].sort_values(["venue","race_no"])
@@ -314,9 +317,9 @@ if filtered.empty:
     post_discord(msg)
     print("対象レースなし")
 else:
-    payout_note = f" / 期待払戻≥{MIN_PAYOUT:,}円" if MIN_PAYOUT > 0 else ""
+    ev_note = f" / EV≥{MIN_EV:.0f}円" if MIN_EV > 0 else ""
     lines = [f"**:checkered_flag: {TARGET_DATE} 競輪予想 ({HOUR_JST}時台)**",
-             f"フィルター: top_score≥95 & gap≥2 & 7車限定{payout_note}",
+             f"フィルター: top_score≥95 & gap≥2 & 7車限定{ev_note}",
              f"対象: {len(filtered)}レース\n"]
 
     for _, row in filtered.iterrows():
@@ -324,11 +327,12 @@ else:
         p3 = int(row["pred_3rd"]) if pd.notna(row["pred_3rd"]) else "?"
         ct = row.get("close_time", "")
         time_str = f"  締切: {ct}" if ct and str(ct) != "nan" else ""
+        ev = int(row["expected_value"]) if pd.notna(row["expected_value"]) else 0
         avg_pay = int(row["avg_payout"]) if pd.notna(row["avg_payout"]) else 0
         lines.append(
             f":round_pushpin: **{row['venue']} {int(row['race_no'])}R**{time_str}\n"
             f"  予想: `{int(row['pred_1st'])}-{p2}-{p3}`\n"
-            f"  top_score: {row['top_score']:.1f} / gap: {row['score_gap']:.1f} / 期待払戻: {avg_pay:,}円"
+            f"  score: {row['top_score']:.1f} / gap: {row['score_gap']:.1f} / EV: {ev:,}円 (avg払戻: {avg_pay:,}円)"
         )
 
     msg = "\n".join(lines)
