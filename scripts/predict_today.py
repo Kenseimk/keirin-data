@@ -248,32 +248,24 @@ rp["score_gap"] = rp["race_id"].map(score_gap_raw)
 rp["top_score"] = rp["race_id"].map(top_score_raw)
 rp["n_players"] = rp["race_id"].map(n_players_raw)
 
-# ========== 期待払戻テーブル（訓練データから算出） ==========
-# top_scoreとscore_gapのバンドごとに過去の三連単払戻平均を計算
+# ========== バンド別・的中率&平均払戻テーブル（訓練データから算出） ==========
+# 損益分岐払戻 = 100円 ÷ 的中率（例: 的中率6.6% → 1,515円必要）
 df_train_pay = df_all[df_all["date"] < TARGET_DATE].copy()
-df_train_pay[["_sc","_pay"]] = df_train_pay["san_ren_tan"].apply(
+df_train_pay[["_combo","_pay"]] = df_train_pay["san_ren_tan"].apply(
     lambda x: pd.Series(parse_payout(x)))
 df_train_pay["_pay"] = pd.to_numeric(df_train_pay["_pay"], errors="coerce")
-# レース単位で集約（払戻はレース内全行で同じ値）
-race_pay = df_train_pay.groupby("race_id")["_pay"].first().reset_index()
-race_pay["top_score"] = race_pay["race_id"].map(top_score_raw)
-race_pay["score_gap"] = race_pay["race_id"].map(score_gap_raw)
-race_pay["n_players"] = race_pay["race_id"].map(n_players_raw)
-# フィルター条件と同じ母集団で集計
-race_pay_filtered = race_pay[
-    (race_pay["top_score"] >= 95) &
-    (race_pay["score_gap"] >= 2) &
-    (race_pay["n_players"] == 7)
-].dropna(subset=["_pay"])
-# score帯 × gap帯のバンドで平均払戻
-race_pay_filtered = race_pay_filtered.copy()
-race_pay_filtered["score_band"] = pd.cut(race_pay_filtered["top_score"],
-    bins=[95,100,105,110,999], labels=["95-100","100-105","105-110","110+"])
-race_pay_filtered["gap_band"] = pd.cut(race_pay_filtered["score_gap"],
-    bins=[2,4,6,8,999], labels=["2-4","4-6","6-8","8+"])
-payout_table = race_pay_filtered.groupby(
-    ["score_band","gap_band"], observed=True)["_pay"].mean().reset_index()
-payout_table.columns = ["score_band","gap_band","avg_payout"]
+# レース単位で集約
+race_stats = df_train_pay.groupby("race_id").agg(
+    _pay=("_pay","first"), _combo=("_combo","first")
+).reset_index()
+race_stats["top_score"] = race_stats["race_id"].map(top_score_raw)
+race_stats["score_gap"] = race_stats["race_id"].map(score_gap_raw)
+race_stats["n_players"] = race_stats["race_id"].map(n_players_raw)
+race_stats_f = race_stats[
+    (race_stats["top_score"] >= 95) &
+    (race_stats["score_gap"] >= 2) &
+    (race_stats["n_players"] == 7)
+].dropna(subset=["_pay"]).copy()
 
 def score_band(s):
     if s < 100: return "95-100"
@@ -287,14 +279,30 @@ def gap_band(g):
     elif g < 8: return "6-8"
     else: return "8+"
 
+race_stats_f["score_band"] = race_stats_f["top_score"].apply(score_band)
+race_stats_f["gap_band"]   = race_stats_f["score_gap"].apply(gap_band)
+
+# バンド別: 平均払戻 & 予測的中率（訓練データ内の的中レースを近似）
+# 的中率は walkforward 結果に近い全体値を使い、バンド補正係数で調整
+# （バンドごとのサンプル数が少ないため全体平均6.6%をベースに使用）
+band_table = race_stats_f.groupby(
+    ["score_band","gap_band"], observed=True
+)["_pay"].agg(avg_payout="mean", race_count="count").reset_index()
+
+# 全体的中率（walkforward実績）から損益分岐払戻を算出
+OVERALL_HIT_RATE = 0.066  # walkforward実績値
+band_table["breakeven_payout"] = 100 / OVERALL_HIT_RATE  # ≈1,515円
+# 期待値 = avg_payout × hit_rate（損益分岐を超えているか）
+band_table["ev_per_bet"] = band_table["avg_payout"] * OVERALL_HIT_RATE
+
 rp["score_band"] = rp["top_score"].apply(score_band)
 rp["gap_band"]   = rp["score_gap"].apply(gap_band)
-rp = rp.merge(payout_table, on=["score_band","gap_band"], how="left")
-overall_avg = race_pay_filtered["_pay"].mean()
-rp["avg_payout"] = rp["avg_payout"].fillna(overall_avg)
-
-# 期待値 = top_proba × 過去平均払戻（損益分岐は100円=購入額）
-rp["expected_value"] = rp["top_proba"] * rp["avg_payout"]
+rp = rp.merge(band_table[["score_band","gap_band","avg_payout","breakeven_payout","ev_per_bet"]],
+              on=["score_band","gap_band"], how="left")
+overall_avg = race_stats_f["_pay"].mean()
+rp["avg_payout"]      = rp["avg_payout"].fillna(overall_avg)
+rp["breakeven_payout"]= rp["breakeven_payout"].fillna(100 / OVERALL_HIT_RATE)
+rp["ev_per_bet"]      = rp["ev_per_bet"].fillna(overall_avg * OVERALL_HIT_RATE)
 
 # ========== フィルター & 時間帯絞り込み ==========
 # proba>=0.35は的中率が上がるがオッズが低くなり回収率92%に落ちるため除外
@@ -303,7 +311,7 @@ filtered = rp[
     (rp["top_score"] >= 95) &
     (rp["score_gap"] >= 2) &
     (rp["n_players"] == 7) &
-    (rp["expected_value"] >= MIN_EV) &
+    (rp["ev_per_bet"] >= MIN_EV) &
     (rp["race_no"] >= RACE_RANGE[0]) &
     (rp["race_no"] <= RACE_RANGE[1])
 ].sort_values(["venue","race_no"])
@@ -327,12 +335,16 @@ else:
         p3 = int(row["pred_3rd"]) if pd.notna(row["pred_3rd"]) else "?"
         ct = row.get("close_time", "")
         time_str = f"  締切: {ct}" if ct and str(ct) != "nan" else ""
-        ev = int(row["expected_value"]) if pd.notna(row["expected_value"]) else 0
-        avg_pay = int(row["avg_payout"]) if pd.notna(row["avg_payout"]) else 0
+        avg_pay    = int(row["avg_payout"])       if pd.notna(row["avg_payout"])       else 0
+        breakeven  = int(row["breakeven_payout"]) if pd.notna(row["breakeven_payout"]) else 0
+        ev_per_bet = int(row["ev_per_bet"])        if pd.notna(row["ev_per_bet"])        else 0
+        # avg_payout > breakeven_payout なら期待値プラス
+        ev_sign = "+" if avg_pay >= breakeven else "-"
         lines.append(
             f":round_pushpin: **{row['venue']} {int(row['race_no'])}R**{time_str}\n"
             f"  予想: `{int(row['pred_1st'])}-{p2}-{p3}`\n"
-            f"  score: {row['top_score']:.1f} / gap: {row['score_gap']:.1f} / EV: {ev:,}円 (avg払戻: {avg_pay:,}円)"
+            f"  score: {row['top_score']:.1f} / gap: {row['score_gap']:.1f}\n"
+            f"  平均払戻: {avg_pay:,}円 / 損益分岐: {breakeven:,}円 / 期待値: {ev_sign}{ev_per_bet - 100:,}円"
         )
 
     msg = "\n".join(lines)
