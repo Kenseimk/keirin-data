@@ -148,6 +148,13 @@ venue_win = df_all_sorted.groupby(["player_key","venue_slug"])["is_win"].transfo
 )
 df_all["venue_win_rate"] = venue_win
 
+# 条件付き特徴量: 本命選手（◎）の脚質と競走得点をレース全選手に付与
+# → model2/3が「1着になりやすい選手の脚質」を条件として学習できる
+honmei_style = df_all[df_all["is_honmei"]==1].set_index("race_id")["style_num"]
+honmei_score = df_all[df_all["is_honmei"]==1].set_index("race_id")["race_score"]
+df_all["honmei_style_num"]   = df_all["race_id"].map(honmei_style)
+df_all["honmei_race_score"]  = df_all["race_id"].map(honmei_score)
+
 FEATURES_BASE = ["race_score","class_num","style_num","gear",
                  "score_rank","is_honmei","n_players_in_race",
                  "prev1_rank","last3_avg_rank","last5_avg_rank",
@@ -158,7 +165,12 @@ FEATURES_BASE = ["race_score","class_num","style_num","gear",
 # 直近4ヶ月成績（新規スクレイピング分のみ存在、旧データはNaN→LGBMがNaN対応）
 FEATURES_NEW  = ["mark_num","win_rate_4m","top2_rate_4m","top3_rate_4m",
                  "nige_4m","maku_4m"]
-FEATURES = FEATURES_BASE + FEATURES_NEW
+# 条件付き特徴量: 1着本命の脚質・得点（model2/3専用）
+FEATURES_COND = ["honmei_style_num","honmei_race_score"]
+
+FEATURES      = FEATURES_BASE + FEATURES_NEW
+FEATURES_2ND  = FEATURES_BASE + FEATURES_NEW + FEATURES_COND
+FEATURES_3RD  = FEATURES_BASE + FEATURES_NEW + FEATURES_COND
 
 # score_gap・top_score・n_players をdf_allから計算（バグ修正済み）
 def calc_gap(x):
@@ -201,11 +213,13 @@ def fit_es(params, X_tr, y_tr, X_val, y_val):
                      lgb.log_evaluation(-1)])
     return m
 
-X_tr  = df_tr[FEATURES].values
-X_val = df_val[FEATURES].values
-model  = fit_es(LGB_PARAMS, X_tr, df_tr["is_winner"].values, X_val, df_val["is_winner"].values)
-model2 = fit_es(LGB_PARAMS, X_tr, df_tr["is_2nd"].values,    X_val, df_val["is_2nd"].values)
-model3 = fit_es(LGB_PARAMS, X_tr, df_tr["is_3rd"].values,    X_val, df_val["is_3rd"].values)
+X_tr    = df_tr[FEATURES].values
+X_val_f = df_val[FEATURES].values
+X_tr2   = df_tr[FEATURES_2ND].values
+X_val2  = df_val[FEATURES_2ND].values
+model  = fit_es(LGB_PARAMS, X_tr,  df_tr["is_winner"].values, X_val_f, df_val["is_winner"].values)
+model2 = fit_es(LGB_PARAMS, X_tr2, df_tr["is_2nd"].values,    X_val2,  df_val["is_2nd"].values)
+model3 = fit_es(LGB_PARAMS, X_tr2, df_tr["is_3rd"].values,    X_val2,  df_val["is_3rd"].values)
 print(f"  best iterations: 1着={model.best_iteration_} / 2着={model2.best_iteration_} / 3着={model3.best_iteration_}")
 
 # ========== 当日データ（未完走レースもrank_numなしで予測対象にする） ==========
@@ -217,31 +231,38 @@ if df_today.empty:
     sys.exit(0)
 
 df_today["win_proba"] = model.predict_proba( df_today[FEATURES].values)[:, 1]
-df_today["p2_proba"]  = model2.predict_proba(df_today[FEATURES].values)[:, 1]
-df_today["p3_proba"]  = model3.predict_proba(df_today[FEATURES].values)[:, 1]
+df_today["p2_proba"]  = model2.predict_proba(df_today[FEATURES_2ND].values)[:, 1]
+df_today["p3_proba"]  = model3.predict_proba(df_today[FEATURES_3RD].values)[:, 1]
 
 rows = []
 for race_id, grp_r in df_today.groupby("race_id"):
     grp_r = grp_r.sort_values("win_proba", ascending=False)
     if len(grp_r) < 3:
         continue
-    pred_1 = int(grp_r.iloc[0]["banum"])
+    pred_1    = int(grp_r.iloc[0]["banum"])
     top_proba = float(grp_r.iloc[0]["win_proba"])
+    close_time = grp_r["close_time"].iloc[0] if "close_time" in grp_r.columns else ""
+
+    # フォーメーション: 2着を上位2候補取得
     rest2 = grp_r[grp_r["banum"] != pred_1].sort_values("p2_proba", ascending=False)
-    pred_2 = int(rest2.iloc[0]["banum"]) if len(rest2) >= 1 else None
-    rest3 = grp_r[~grp_r["banum"].isin([pred_1, pred_2])].sort_values("p3_proba", ascending=False)
-    pred_3 = int(rest3.iloc[0]["banum"]) if len(rest3) >= 1 else None
-    rows.append({
-        "race_id":    race_id,
-        "venue":      grp_r["venue_slug"].iloc[0],
-        "date":       grp_r["date"].iloc[0],
-        "race_no":    grp_r["race_no"].iloc[0],
-        "pred_1st":   pred_1,
-        "pred_2nd":   pred_2,
-        "pred_3rd":   pred_3,
-        "top_proba":  top_proba,
-        "close_time": grp_r["close_time"].iloc[0] if "close_time" in grp_r.columns else "",
-    })
+    pred_2a = int(rest2.iloc[0]["banum"]) if len(rest2) >= 1 else None
+    pred_2b = int(rest2.iloc[1]["banum"]) if len(rest2) >= 2 else None
+
+    # 各2着候補に対して3着を決定
+    def pick_3rd(exclude_banums):
+        rest3 = grp_r[~grp_r["banum"].isin(exclude_banums)].sort_values("p3_proba", ascending=False)
+        return int(rest3.iloc[0]["banum"]) if len(rest3) >= 1 else None
+
+    pred_3a = pick_3rd([pred_1, pred_2a])
+    pred_3b = pick_3rd([pred_1, pred_2b]) if pred_2b else None
+
+    base = {"race_id": race_id, "venue": grp_r["venue_slug"].iloc[0],
+            "date": grp_r["date"].iloc[0], "race_no": grp_r["race_no"].iloc[0],
+            "pred_1st": pred_1, "top_proba": top_proba, "close_time": close_time}
+    rows.append({**base, "pred_2nd": pred_2a, "pred_3rd": pred_3a, "formation": "A"})
+    if pred_2b:
+        rows.append({**base, "pred_2nd": pred_2b, "pred_3rd": pred_3b, "formation": "B"})
+
 rp = pd.DataFrame(rows)
 
 rp["score_gap"] = rp["race_id"].map(score_gap_raw)
@@ -330,19 +351,27 @@ else:
              f"フィルター: top_score≥95 & gap≥2 & 7車限定{ev_note}",
              f"対象: {len(filtered)}レース\n"]
 
-    for _, row in filtered.iterrows():
-        p2 = int(row["pred_2nd"]) if pd.notna(row["pred_2nd"]) else "?"
-        p3 = int(row["pred_3rd"]) if pd.notna(row["pred_3rd"]) else "?"
+    # レース単位でA/Bをまとめて表示
+    for race_id, race_rows in filtered.groupby("race_id", sort=False):
+        race_rows = race_rows.sort_values("formation")
+        row = race_rows.iloc[0]
         ct = row.get("close_time", "")
-        time_str = f"  締切: {ct}" if ct and str(ct) != "nan" else ""
+        time_str   = f"  締切: {ct}" if ct and str(ct) != "nan" else ""
         avg_pay    = int(row["avg_payout"])       if pd.notna(row["avg_payout"])       else 0
         breakeven  = int(row["breakeven_payout"]) if pd.notna(row["breakeven_payout"]) else 0
         ev_per_bet = int(row["ev_per_bet"])        if pd.notna(row["ev_per_bet"])        else 0
-        # avg_payout > breakeven_payout なら期待値プラス
         ev_sign = "+" if avg_pay >= breakeven else "-"
+
+        combos = []
+        for _, r in race_rows.iterrows():
+            p2 = int(r["pred_2nd"]) if pd.notna(r["pred_2nd"]) else "?"
+            p3 = int(r["pred_3rd"]) if pd.notna(r["pred_3rd"]) else "?"
+            combos.append(f"`{int(r['pred_1st'])}-{p2}-{p3}`")
+        combo_str = "  /  ".join(combos)
+
         lines.append(
             f":round_pushpin: **{row['venue']} {int(row['race_no'])}R**{time_str}\n"
-            f"  予想: `{int(row['pred_1st'])}-{p2}-{p3}`\n"
+            f"  予想: {combo_str}\n"
             f"  score: {row['top_score']:.1f} / gap: {row['score_gap']:.1f}\n"
             f"  平均払戻: {avg_pay:,}円 / 損益分岐: {breakeven:,}円 / 期待値: {ev_sign}{ev_per_bet - 100:,}円"
         )
