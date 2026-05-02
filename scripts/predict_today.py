@@ -6,19 +6,12 @@ if hasattr(sys.stderr, 'buffer'):
     sys.stderr = _io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 """
-当日の競輪予想を生成してDiscordに投稿する
+当日の競輪予想を生成してDiscordに投稿する（コンボモデル版）
 フィルター: top_score>=95 & score_gap>=2 & 7車限定
 実行タイミング: JST 10:00 / 12:00 / 14:00 / 16:00
-  → 各実行で「次の2時間に始まる」レース番号帯だけ投稿
-
-race_no の時間帯推定（1日12レース想定）:
-  10:00実行 → race_no 1-3
-  12:00実行 → race_no 4-6
-  14:00実行 → race_no 7-9
-  16:00実行 → race_no 10以上
 """
 
-import os, glob, re, warnings, requests, argparse
+import os, glob, re, warnings, requests, argparse, itertools
 from datetime import datetime, timezone, timedelta
 import numpy as np
 import pandas as pd
@@ -29,31 +22,26 @@ warnings.filterwarnings("ignore")
 
 JST = timezone(timedelta(hours=9))
 
-# ========== 引数 ==========
 parser = argparse.ArgumentParser()
-parser.add_argument("--date", default=None, help="対象日 (例: 2026-03-31)。省略時は今日")
-parser.add_argument("--hour", type=int, default=None, help="実行時刻(JST時)。省略時は現在時刻")
-parser.add_argument("--all",  action="store_true", help="全レース帯を投稿（テスト用）")
-parser.add_argument("--min_ev", type=float, default=0.0,
-                    help="期待値フィルター(円)。top_proba×過去平均払戻がこれ未満のレースを除外 (例: 500 → 期待収支+500円以上)")
+parser.add_argument("--date", default=None)
+parser.add_argument("--hour", type=int, default=None)
+parser.add_argument("--all",  action="store_true")
 args = parser.parse_args()
 
 now_jst     = datetime.now(JST)
 TARGET_DATE = args.date or now_jst.strftime("%Y-%m-%d")
 HOUR_JST    = args.hour if args.hour is not None else now_jst.hour
 
-# 時間帯 → race_no 範囲
 def race_no_range(hour):
-    if hour < 12:   return (1,  4)   # 8時台  → 1〜4R
-    elif hour < 19: return (5,  9)   # 12時台 → 5〜9R
-    else:           return (10, 99)  # 19時台 → 10R以降
+    if hour < 12:   return (1,  4)
+    elif hour < 19: return (5,  9)
+    else:           return (10, 99)
 
 RACE_RANGE = (1, 99) if args.all else race_no_range(HOUR_JST)
 print(f"対象日: {TARGET_DATE}  JST {HOUR_JST}時台  race_no {RACE_RANGE[0]}〜{RACE_RANGE[1]}")
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
-# ========== Discord投稿 ==========
 def post_discord(content: str):
     if not DISCORD_WEBHOOK:
         print("[Discord] WEBHOOK未設定\n" + content)
@@ -63,8 +51,12 @@ def post_discord(content: str):
         print(f"[Discord] 投稿失敗: {r.status_code} {r.text}")
 
 # ========== データ読み込み ==========
+TOP_K = 5
+TOP_SCORE_THRESH = 95
+SCORE_GAP_THRESH = 2
+
 DATA_DIR = Path("keirin_data")
-files = [f for f in sorted(glob.glob(str(DATA_DIR / "202[3456]_*.csv"))) if "sample" not in f]
+files = [f for f in sorted(glob.glob(str(DATA_DIR / "202[3456]_*.csv"))) if "sample" not in f and "bak" not in f]
 df_all = pd.concat([pd.read_csv(f, encoding="utf-8-sig") for f in files], ignore_index=True)
 print(f"総行数: {len(df_all):,}")
 
@@ -74,31 +66,30 @@ def parse_payout(s):
     if m: return m.group(1), int(m.group(2).replace(",", ""))
     return None, None
 
-df_all[["ni_combo","ni_payout"]]   = df_all["ni_sha_tan"].apply(lambda x: pd.Series(parse_payout(x)))
 df_all[["san_combo","san_payout"]] = df_all["san_ren_tan"].apply(lambda x: pd.Series(parse_payout(x)))
 
 CLASS_MAP = {"S1":4,"S2":3,"A1":2,"A2":1,"B":0}
 STYLE_MAP  = {"逃":5,"捲":4,"両":3,"差":2,"追":1,"マ":0}
 
-df_all["player_key"]    = df_all["player_name"].astype(str)+"_"+df_all["term"].astype(str)
-df_all["rank_num"]      = pd.to_numeric(df_all["rank"], errors="coerce")
-df_all["class_num"]     = df_all["player_class"].map(CLASS_MAP).fillna(1)
-df_all["style_num"]     = df_all["running_style"].map(STYLE_MAP).fillna(2)
-df_all["race_score"]    = pd.to_numeric(df_all["race_score"], errors="coerce")
-df_all["gear"]          = pd.to_numeric(df_all["gear"], errors="coerce")
-df_all["banum"]         = pd.to_numeric(df_all["banum"], errors="coerce")
-
-df_all["is_win"]        = (df_all["rank_num"]==1).astype(float)
-df_all["is_winner"]     = (df_all["rank_num"]==1).astype(int)
-df_all["is_2nd"]        = (df_all["rank_num"]==2).astype(int)
-df_all["is_3rd"]        = (df_all["rank_num"]==3).astype(int)
-# 直近4ヶ月成績（新規スクレイピング分のみ存在、旧データはNaN→LGBMがNaN対応）
-df_all["mark_num"]      = pd.to_numeric(df_all.get("mark_num"),      errors="coerce")
-df_all["win_rate_4m"]   = pd.to_numeric(df_all.get("win_rate_4m"),   errors="coerce")
-df_all["top2_rate_4m"]  = pd.to_numeric(df_all.get("top2_rate_4m"),  errors="coerce")
-df_all["top3_rate_4m"]  = pd.to_numeric(df_all.get("top3_rate_4m"),  errors="coerce")
-df_all["nige_4m"]       = pd.to_numeric(df_all.get("nige_4m"),       errors="coerce")
-df_all["maku_4m"]       = pd.to_numeric(df_all.get("maku_4m"),       errors="coerce")
+df_all["player_key"]   = df_all["player_name"].astype(str)+"_"+df_all["term"].astype(str)
+df_all["rank_num"]     = pd.to_numeric(df_all["rank"], errors="coerce")
+df_all["class_num"]    = df_all["player_class"].map(CLASS_MAP).fillna(1)
+df_all["style_num"]    = df_all["running_style"].map(STYLE_MAP).fillna(2)
+df_all["race_score"]   = pd.to_numeric(df_all["race_score"], errors="coerce")
+df_all["gear"]         = pd.to_numeric(df_all["gear"], errors="coerce")
+df_all["banum"]        = pd.to_numeric(df_all["banum"], errors="coerce")
+df_all["agari"]        = pd.to_numeric(df_all["agari"], errors="coerce")
+df_all["age"]          = pd.to_numeric(df_all.get("age"), errors="coerce")
+df_all["is_win"]       = (df_all["rank_num"]==1).astype(float)
+df_all["is_winner"]    = (df_all["rank_num"]==1).astype(int)
+df_all["is_2nd"]       = (df_all["rank_num"]==2).astype(int)
+df_all["is_3rd"]       = (df_all["rank_num"]==3).astype(int)
+df_all["mark_num"]     = pd.to_numeric(df_all.get("mark_num"),     errors="coerce")
+df_all["win_rate_4m"]  = pd.to_numeric(df_all.get("win_rate_4m"),  errors="coerce")
+df_all["top2_rate_4m"] = pd.to_numeric(df_all.get("top2_rate_4m"), errors="coerce")
+df_all["top3_rate_4m"] = pd.to_numeric(df_all.get("top3_rate_4m"), errors="coerce")
+df_all["nige_4m"]      = pd.to_numeric(df_all.get("nige_4m"),      errors="coerce")
+df_all["maku_4m"]      = pd.to_numeric(df_all.get("maku_4m"),      errors="coerce")
 
 df_all = df_all.sort_values(["player_key","date","race_no"]).reset_index(drop=True)
 grp = df_all.groupby("player_key")["rank_num"]
@@ -113,27 +104,38 @@ df_all["days_since_last"]= (
     pd.to_datetime(df_all.groupby("player_key")["date"].shift(1))
 ).dt.days
 
+agari_grp = df_all.groupby("player_key")["agari"]
+df_all["last3_avg_agari"] = agari_grp.transform(lambda x: x.shift(1).rolling(3,min_periods=1).mean())
+df_all["last5_avg_agari"] = agari_grp.transform(lambda x: x.shift(1).rolling(5,min_periods=1).mean())
+df_all["same_pref_count"] = (df_all.groupby(["race_id","pref"])["banum"].transform("count") - 1).clip(lower=0)
+df_all["same_term_count"] = (df_all.groupby(["race_id","term"])["banum"].transform("count") - 1).clip(lower=0)
+df_all["nige_in_race"]    = df_all.groupby("race_id")["running_style"].transform(lambda x: (x=="逃").sum())
+df_all_s = df_all.sort_values(["player_key","date","race_no"])
+df_all["venue_win_rate"]  = df_all_s.groupby(["player_key","venue_slug"])["is_win"].transform(
+    lambda x: x.shift(1).rolling(10,min_periods=1).mean())
+
+df_all["_is_nige_f"]  = (df_all["finish_type"] == "逃切").astype(float)
+df_all["_is_sashi_f"] = df_all["finish_type"].isin(["差切","追込"]).astype(float)
+df_all["is_nige_finish"]  = df_all.groupby("player_key")["_is_nige_f"].transform(
+    lambda x: x.shift(1).rolling(10, min_periods=1).mean())
+df_all["is_sashi_finish"] = df_all.groupby("player_key")["_is_sashi_f"].transform(
+    lambda x: x.shift(1).rolling(10, min_periods=1).mean())
+
 def extract_honmei(x):
     if pd.isna(x): return None
     m = re.search(r"◎(\d+)", str(x))
     return int(m.group(1)) if m else None
-df_all["honmei_banum"] = df_all["lineup"].apply(extract_honmei)
-df_all["score_rank"]   = df_all.groupby("race_id")["race_score"].rank(ascending=False, method="min")
-df_all["is_honmei"]    = (df_all["banum"]==df_all["honmei_banum"]).astype(int)
-df_all["is_winner"]    = (df_all["rank_num"]==1).astype(int)
+df_all["honmei_banum"]      = df_all["lineup"].apply(extract_honmei)
+df_all["score_rank"]        = df_all.groupby("race_id")["race_score"].rank(ascending=False, method="min")
+df_all["is_honmei"]         = (df_all["banum"]==df_all["honmei_banum"]).astype(int)
 n_pl = df_all.groupby("race_id")["banum"].count().rename("n_players_in_race")
 df_all = df_all.join(n_pl, on="race_id")
 
-FEATURES_BASE = ["race_score","class_num","style_num","gear",
-                 "score_rank","is_honmei","n_players_in_race",
-                 "prev1_rank","last3_avg_rank","last5_avg_rank",
-                 "last5_win_rate","rank_trend","days_since_last"]
-# 直近4ヶ月成績（新規スクレイピング分のみ存在、旧データはNaN→LGBMがNaN対応）
-FEATURES_NEW  = ["mark_num","win_rate_4m","top2_rate_4m","top3_rate_4m",
-                 "nige_4m","maku_4m"]
-FEATURES = FEATURES_BASE + FEATURES_NEW
+honmei_style = df_all[df_all["is_honmei"]==1].set_index("race_id")["style_num"]
+honmei_score = df_all[df_all["is_honmei"]==1].set_index("race_id")["race_score"]
+df_all["honmei_style_num"]  = df_all["race_id"].map(honmei_style)
+df_all["honmei_race_score"] = df_all["race_id"].map(honmei_score)
 
-# score_gap・top_score・n_players をdf_allから計算（バグ修正済み）
 def calc_gap(x):
     s = sorted(x.dropna(), reverse=True)
     return s[0]-s[1] if len(s)>=2 else np.nan
@@ -142,205 +144,277 @@ score_gap_raw = df_all.groupby("race_id")["race_score"].apply(calc_gap)
 top_score_raw = df_all.groupby("race_id")["race_score"].max()
 n_players_raw = df_all.groupby("race_id")["banum"].nunique()
 
-df_model = df_all.dropna(subset=FEATURES_BASE+["rank_num"]).copy()
+F1  = ["race_score","class_num","style_num","gear","score_rank","is_honmei",
+       "n_players_in_race","prev1_rank","last3_avg_rank","last5_avg_rank",
+       "last5_win_rate","rank_trend","days_since_last",
+       "last3_avg_agari","last5_avg_agari","same_pref_count","same_term_count",
+       "nige_in_race","venue_win_rate",
+       "mark_num","win_rate_4m","top2_rate_4m","top3_rate_4m","nige_4m","maku_4m"]
+F23 = F1 + ["honmei_style_num","honmei_race_score"]
+
+PLAYER_COLS = ["race_score","class_num","style_num","gear","last3_avg_rank","last5_avg_rank",
+               "last5_win_rate","win_rate_4m","top2_rate_4m","top3_rate_4m","nige_4m","maku_4m",
+               "venue_win_rate","same_pref_count","same_term_count","days_since_last",
+               "age","is_nige_finish","is_sashi_finish","score_rank","is_honmei"]
+
+COMBO_FEATS = [
+    "p1_win_proba","p1_score","p1_class","p1_style","p1_win_rate",
+    "p1_last3_rank","p1_last5_rank","p1_nige_rate","p1_maku_rate",
+    "p1_venue_win","p1_days","p1_age","p1_score_rank","p1_is_honmei","p1_nige_finish",
+    "p2_p2_proba","p2_score","p2_class","p2_style","p2_top2_rate",
+    "p2_last3_rank","p2_last5_rank","p2_age","p2_score_rank","p2_is_honmei",
+    "p3_p3_proba","p3_score","p3_class","p3_style","p3_top3_rate",
+    "p3_last3_rank","p3_age","p3_score_rank","p3_sashi_finish",
+    "same_pref_12","same_pref_13","same_pref_23","same_pref_total",
+    "same_term_12","same_term_13","same_term_23","same_term_total",
+    "style_1_nige","style_1_maku","style_3_sashi",
+    "nige_line_12","maku_line_12",
+    "score_diff_12","score_diff_13","score_diff_23",
+    "class_diff_12","class_diff_13",
+    "prob_product","prob_sum_log","win_proba_gap",
+    "banum_12","banum_13",
+    "score_gap_race","top_score",
+]
+
+req = ["race_score","class_num","style_num","gear","score_rank","is_honmei",
+       "n_players_in_race","prev1_rank","last3_avg_rank","last5_avg_rank",
+       "last5_win_rate","rank_trend","days_since_last","rank_num"]
+df_model = df_all.dropna(subset=req).copy()
 
 # ========== 訓練: 対象日より前 ==========
-df_train = df_model[df_model["date"] < TARGET_DATE]
+df_train = df_model[df_model["date"] < TARGET_DATE].copy()
 if len(df_train) < 1000:
     print("訓練データ不足")
     sys.exit(1)
 
-print(f"訓練: {len(df_train):,}行 ({df_train['race_id'].nunique():,}レース)")
-
-# 訓練データの末尾3ヶ月を検証用（early stopping）
-VAL_MONTHS = 3
-ES_ROUNDS  = 50
-all_months = sorted(df_train['date'].str[:7].unique())
-val_months_list = all_months[-VAL_MONTHS:]
-val_mask = df_train['date'].str[:7].isin(val_months_list)
-df_tr  = df_train[~val_mask]
-df_val = df_train[val_mask]
-print(f"  学習: {len(df_tr):,}行  検証(early stopping): {len(df_val):,}行")
+print(f"訓練: {len(df_train):,}行")
+val_months = sorted(df_train["date"].str[:7].unique())[-3:]
+val_mask   = df_train["date"].str[:7].isin(val_months)
+df_tr  = df_train[~val_mask].copy()
+df_val = df_train[val_mask].copy()
 
 LGB_PARAMS = dict(n_estimators=1000, learning_rate=0.05,
-                  num_leaves=31, min_child_samples=50,
-                  verbose=-1, random_state=42)
+                  num_leaves=31, min_child_samples=50, verbose=-1, random_state=42)
 
-def fit_es(params, X_tr, y_tr, X_val, y_val):
-    m = lgb.LGBMClassifier(**params)
-    m.fit(X_tr, y_tr,
-          eval_set=[(X_val, y_val)],
-          callbacks=[lgb.early_stopping(ES_ROUNDS, verbose=False),
-                     lgb.log_evaluation(-1)])
+def fit_es(F_tr, F_val, y_tr, y_val):
+    m = lgb.LGBMClassifier(**LGB_PARAMS)
+    m.fit(F_tr, y_tr, eval_set=[(F_val, y_val)],
+          callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(-1)])
     return m
 
-X_tr  = df_tr[FEATURES].values
-X_val = df_val[FEATURES].values
-model  = fit_es(LGB_PARAMS, X_tr, df_tr["is_winner"].values, X_val, df_val["is_winner"].values)
-model2 = fit_es(LGB_PARAMS, X_tr, df_tr["is_2nd"].values,    X_val, df_val["is_2nd"].values)
-model3 = fit_es(LGB_PARAMS, X_tr, df_tr["is_3rd"].values,    X_val, df_val["is_3rd"].values)
-print(f"  best iterations: 1着={model.best_iteration_} / 2着={model2.best_iteration_} / 3着={model3.best_iteration_}")
+m1 = fit_es(df_tr[F1].values,  df_val[F1].values,  df_tr["is_winner"].values, df_val["is_winner"].values)
+m2 = fit_es(df_tr[F23].values, df_val[F23].values, df_tr["is_2nd"].values,    df_val["is_2nd"].values)
+m3 = fit_es(df_tr[F23].values, df_val[F23].values, df_tr["is_3rd"].values,    df_val["is_3rd"].values)
+print(f"個別モデル iter: 1着={m1.best_iteration_} / 2着={m2.best_iteration_} / 3着={m3.best_iteration_}")
 
-# ========== 当日データ（未完走レースもrank_numなしで予測対象にする） ==========
-df_today = df_all[df_all["date"] == TARGET_DATE].dropna(subset=FEATURES_BASE).copy()
+for df_part in [df_tr, df_val]:
+    df_part["win_proba"] = m1.predict_proba(df_part[F1].values)[:,1]
+    df_part["p2_proba"]  = m2.predict_proba(df_part[F23].values)[:,1]
+    df_part["p3_proba"]  = m3.predict_proba(df_part[F23].values)[:,1]
+
+# コンボモデル訓練
+def make_combo_rows(df_part, is_train=True):
+    rows = []
+    for race_id, g in df_part.groupby("race_id"):
+        if n_players_raw.get(race_id, 0) != 7: continue
+        top_score = top_score_raw.get(race_id, 0)
+        score_gap = score_gap_raw.get(race_id, 0)
+        if top_score < TOP_SCORE_THRESH or score_gap < SCORE_GAP_THRESH: continue
+
+        g = g.copy()
+        san_combo  = g["san_combo"].iloc[0]
+        san_payout = g["san_payout"].iloc[0]
+
+        correct_1, correct_2, correct_3 = None, None, None
+        if pd.notna(san_combo):
+            parts = re.split(r"[-=]", str(san_combo))
+            if len(parts) == 3:
+                try: correct_1, correct_2, correct_3 = int(parts[0]), int(parts[1]), int(parts[2])
+                except: pass
+
+        top1_cands = g.nlargest(TOP_K, "win_proba")["banum"].astype(int).tolist()
+        top2_cands = g.nlargest(TOP_K, "p2_proba")["banum"].astype(int).tolist()
+        top3_cands = g.nlargest(TOP_K, "p3_proba")["banum"].astype(int).tolist()
+        player_info = g.set_index("banum")[PLAYER_COLS + ["win_proba","p2_proba","p3_proba","pref","term"]]
+
+        for b1, b2, b3 in itertools.product(top1_cands, top2_cands, top3_cands):
+            if len({b1, b2, b3}) < 3: continue
+            try:
+                p1 = player_info.loc[b1]; p2 = player_info.loc[b2]; p3 = player_info.loc[b3]
+            except KeyError: continue
+
+            sp12 = int(p1["pref"]==p2["pref"]); sp13 = int(p1["pref"]==p3["pref"]); sp23 = int(p2["pref"]==p3["pref"])
+            st12 = int(p1["term"]==p2["term"]); st13 = int(p1["term"]==p3["term"]); st23 = int(p2["term"]==p3["term"])
+            s1n  = int(p1["style_num"]==5); s1m = int(p1["style_num"]==4)
+            prob = float(p1["win_proba"])*float(p2["p2_proba"])*float(p3["p3_proba"])
+
+            rows.append({
+                "race_id": race_id, "b1": b1, "b2": b2, "b3": b3,
+                "san_combo": san_combo, "san_payout": san_payout,
+                "top_score": top_score, "score_gap": score_gap,
+                "p1_win_proba": p1["win_proba"], "p1_score": p1["race_score"],
+                "p1_class": p1["class_num"], "p1_style": p1["style_num"],
+                "p1_win_rate": p1["win_rate_4m"], "p1_last3_rank": p1["last3_avg_rank"],
+                "p1_last5_rank": p1["last5_avg_rank"], "p1_nige_rate": p1["nige_4m"],
+                "p1_maku_rate": p1["maku_4m"], "p1_venue_win": p1["venue_win_rate"],
+                "p1_days": p1["days_since_last"], "p1_age": p1["age"],
+                "p1_score_rank": p1["score_rank"], "p1_is_honmei": p1["is_honmei"],
+                "p1_nige_finish": p1["is_nige_finish"],
+                "p2_p2_proba": p2["p2_proba"], "p2_score": p2["race_score"],
+                "p2_class": p2["class_num"], "p2_style": p2["style_num"],
+                "p2_top2_rate": p2["top2_rate_4m"], "p2_last3_rank": p2["last3_avg_rank"],
+                "p2_last5_rank": p2["last5_avg_rank"], "p2_age": p2["age"],
+                "p2_score_rank": p2["score_rank"], "p2_is_honmei": p2["is_honmei"],
+                "p3_p3_proba": p3["p3_proba"], "p3_score": p3["race_score"],
+                "p3_class": p3["class_num"], "p3_style": p3["style_num"],
+                "p3_top3_rate": p3["top3_rate_4m"], "p3_last3_rank": p3["last3_avg_rank"],
+                "p3_age": p3["age"], "p3_score_rank": p3["score_rank"],
+                "p3_sashi_finish": p3["is_sashi_finish"],
+                "same_pref_12": sp12, "same_pref_13": sp13, "same_pref_23": sp23, "same_pref_total": sp12+sp13+sp23,
+                "same_term_12": st12, "same_term_13": st13, "same_term_23": st23, "same_term_total": st12+st13+st23,
+                "style_1_nige": s1n, "style_1_maku": s1m,
+                "style_3_sashi": int(float(p3["style_num"])<=2),
+                "nige_line_12": s1n*sp12, "maku_line_12": s1m*sp12,
+                "score_diff_12": float(p1["race_score"])-float(p2["race_score"]),
+                "score_diff_13": float(p1["race_score"])-float(p3["race_score"]),
+                "score_diff_23": float(p2["race_score"])-float(p3["race_score"]),
+                "class_diff_12": float(p1["class_num"])-float(p2["class_num"]),
+                "class_diff_13": float(p1["class_num"])-float(p3["class_num"]),
+                "prob_product": prob,
+                "prob_sum_log": np.log(float(p1["win_proba"])+1e-9)+np.log(float(p2["p2_proba"])+1e-9)+np.log(float(p3["p3_proba"])+1e-9),
+                "win_proba_gap": float(p1["win_proba"])-float(p2["win_proba"]),
+                "banum_12": b2-b1, "banum_13": b3-b1,
+                "score_gap_race": score_gap, "is_hit": int(b1==correct_1 and b2==correct_2 and b3==correct_3),
+            })
+    return pd.DataFrame(rows)
+
+print("コンボデータ生成中...")
+combo_tr  = make_combo_rows(df_tr)
+combo_val = make_combo_rows(df_val)
+if len(combo_tr) == 0 or combo_tr["is_hit"].sum() == 0:
+    print("コンボ訓練データ不足")
+    sys.exit(1)
+
+pos = combo_tr["is_hit"].sum(); neg = len(combo_tr) - pos
+m_combo = lgb.LGBMClassifier(
+    n_estimators=2000, learning_rate=0.02, num_leaves=63,
+    min_child_samples=10, scale_pos_weight=neg/pos, verbose=-1, random_state=42)
+m_combo.fit(
+    combo_tr[COMBO_FEATS].values, combo_tr["is_hit"].values,
+    eval_set=[(combo_val[COMBO_FEATS].values, combo_val["is_hit"].values)],
+    eval_metric="auc",
+    callbacks=[lgb.early_stopping(100, verbose=False, first_metric_only=True), lgb.log_evaluation(-1)]
+)
+print(f"コンボモデル best iter: {m_combo.best_iteration_}")
+
+# ========== 当日データで予測 ==========
+df_today = df_all[df_all["date"] == TARGET_DATE].dropna(subset=req[:-1]).copy()
 if df_today.empty:
-    msg = f"**{TARGET_DATE} の予想データがありません**\n（当日データ未収集の可能性があります）"
-    post_discord(msg)
-    print(msg)
-    sys.exit(0)
+    msg = f"**{TARGET_DATE} の予想データがありません**"
+    post_discord(msg); print(msg); sys.exit(0)
 
-df_today["win_proba"] = model.predict_proba( df_today[FEATURES].values)[:, 1]
-df_today["p2_proba"]  = model2.predict_proba(df_today[FEATURES].values)[:, 1]
-df_today["p3_proba"]  = model3.predict_proba(df_today[FEATURES].values)[:, 1]
+df_today["win_proba"] = m1.predict_proba(df_today[F1].values)[:,1]
+df_today["p2_proba"]  = m2.predict_proba(df_today[F23].values)[:,1]
+df_today["p3_proba"]  = m3.predict_proba(df_today[F23].values)[:,1]
 
-rows = []
-for race_id, grp_r in df_today.groupby("race_id"):
-    grp_r = grp_r.sort_values("win_proba", ascending=False)
-    if len(grp_r) < 3:
+pred_rows = []
+for race_id, g in df_today.groupby("race_id"):
+    top_score = top_score_raw.get(race_id, 0)
+    score_gap = score_gap_raw.get(race_id, 0)
+    n_players = n_players_raw.get(race_id, 0)
+    race_no   = int(g["race_no"].iloc[0])
+
+    if (top_score < TOP_SCORE_THRESH or score_gap < SCORE_GAP_THRESH
+            or n_players != 7 or not (RACE_RANGE[0] <= race_no <= RACE_RANGE[1])):
         continue
-    pred_1    = int(grp_r.iloc[0]["banum"])
-    top_proba = float(grp_r.iloc[0]["win_proba"])
-    close_time = grp_r["close_time"].iloc[0] if "close_time" in grp_r.columns else ""
 
-    # 2着候補を上位2名取得
-    rest2 = grp_r[grp_r["banum"] != pred_1].sort_values("p2_proba", ascending=False)
-    pred_2a    = int(rest2.iloc[0]["banum"])   if len(rest2) >= 1 else None
-    pred_2b    = int(rest2.iloc[1]["banum"])   if len(rest2) >= 2 else None
-    p2_gap     = float(rest2.iloc[0]["p2_proba"] - rest2.iloc[1]["p2_proba"]) if len(rest2) >= 2 else 1.0
-    # gap<0.05=接戦→2通り展開、gap>=0.05=確信度高→1通りに絞る
-    use_formation = (p2_gap < 0.05) and (pred_2b is not None)
+    g = g.copy()
+    top1_cands = g.nlargest(TOP_K, "win_proba")["banum"].astype(int).tolist()
+    top2_cands = g.nlargest(TOP_K, "p2_proba")["banum"].astype(int).tolist()
+    top3_cands = g.nlargest(TOP_K, "p3_proba")["banum"].astype(int).tolist()
+    player_info = g.set_index("banum")[PLAYER_COLS + ["win_proba","p2_proba","p3_proba","pref","term"]]
 
-    def pick_3rd(exclude_banums):
-        rest3 = grp_r[~grp_r["banum"].isin(exclude_banums)].sort_values("p3_proba", ascending=False)
-        return int(rest3.iloc[0]["banum"]) if len(rest3) >= 1 else None
+    combo_rows = []
+    for b1, b2, b3 in itertools.product(top1_cands, top2_cands, top3_cands):
+        if len({b1, b2, b3}) < 3: continue
+        try:
+            p1 = player_info.loc[b1]; p2 = player_info.loc[b2]; p3 = player_info.loc[b3]
+        except KeyError: continue
+        sp12 = int(p1["pref"]==p2["pref"]); sp13 = int(p1["pref"]==p3["pref"]); sp23 = int(p2["pref"]==p3["pref"])
+        st12 = int(p1["term"]==p2["term"]); st13 = int(p1["term"]==p3["term"]); st23 = int(p2["term"]==p3["term"])
+        s1n = int(p1["style_num"]==5); s1m = int(p1["style_num"]==4)
+        prob = float(p1["win_proba"])*float(p2["p2_proba"])*float(p3["p3_proba"])
+        combo_rows.append({
+            "b1": b1, "b2": b2, "b3": b3,
+            "p1_win_proba": p1["win_proba"], "p1_score": p1["race_score"],
+            "p1_class": p1["class_num"], "p1_style": p1["style_num"],
+            "p1_win_rate": p1["win_rate_4m"], "p1_last3_rank": p1["last3_avg_rank"],
+            "p1_last5_rank": p1["last5_avg_rank"], "p1_nige_rate": p1["nige_4m"],
+            "p1_maku_rate": p1["maku_4m"], "p1_venue_win": p1["venue_win_rate"],
+            "p1_days": p1["days_since_last"], "p1_age": p1["age"],
+            "p1_score_rank": p1["score_rank"], "p1_is_honmei": p1["is_honmei"],
+            "p1_nige_finish": p1["is_nige_finish"],
+            "p2_p2_proba": p2["p2_proba"], "p2_score": p2["race_score"],
+            "p2_class": p2["class_num"], "p2_style": p2["style_num"],
+            "p2_top2_rate": p2["top2_rate_4m"], "p2_last3_rank": p2["last3_avg_rank"],
+            "p2_last5_rank": p2["last5_avg_rank"], "p2_age": p2["age"],
+            "p2_score_rank": p2["score_rank"], "p2_is_honmei": p2["is_honmei"],
+            "p3_p3_proba": p3["p3_proba"], "p3_score": p3["race_score"],
+            "p3_class": p3["class_num"], "p3_style": p3["style_num"],
+            "p3_top3_rate": p3["top3_rate_4m"], "p3_last3_rank": p3["last3_avg_rank"],
+            "p3_age": p3["age"], "p3_score_rank": p3["score_rank"],
+            "p3_sashi_finish": p3["is_sashi_finish"],
+            "same_pref_12": sp12, "same_pref_13": sp13, "same_pref_23": sp23, "same_pref_total": sp12+sp13+sp23,
+            "same_term_12": st12, "same_term_13": st13, "same_term_23": st23, "same_term_total": st12+st13+st23,
+            "style_1_nige": s1n, "style_1_maku": s1m,
+            "style_3_sashi": int(float(p3["style_num"])<=2),
+            "nige_line_12": s1n*sp12, "maku_line_12": s1m*sp12,
+            "score_diff_12": float(p1["race_score"])-float(p2["race_score"]),
+            "score_diff_13": float(p1["race_score"])-float(p3["race_score"]),
+            "score_diff_23": float(p2["race_score"])-float(p3["race_score"]),
+            "class_diff_12": float(p1["class_num"])-float(p2["class_num"]),
+            "class_diff_13": float(p1["class_num"])-float(p3["class_num"]),
+            "prob_product": prob,
+            "prob_sum_log": np.log(float(p1["win_proba"])+1e-9)+np.log(float(p2["p2_proba"])+1e-9)+np.log(float(p3["p3_proba"])+1e-9),
+            "win_proba_gap": float(p1["win_proba"])-float(p2["win_proba"]),
+            "banum_12": b2-b1, "banum_13": b3-b1,
+            "score_gap_race": score_gap, "top_score": top_score,
+        })
 
-    pred_3a = pick_3rd([pred_1, pred_2a])
-    pred_3b = pick_3rd([pred_1, pred_2b]) if pred_2b else None
+    if not combo_rows: continue
+    combo_df = pd.DataFrame(combo_rows)
+    combo_df["combo_score"] = m_combo.predict_proba(combo_df[COMBO_FEATS].values)[:,1]
+    best = combo_df.nlargest(1, "combo_score").iloc[0]
 
-    base = {"race_id": race_id, "venue": grp_r["venue_slug"].iloc[0],
-            "date": grp_r["date"].iloc[0], "race_no": grp_r["race_no"].iloc[0],
-            "pred_1st": pred_1, "top_proba": top_proba, "p2_gap": p2_gap,
-            "close_time": close_time}
-    rows.append({**base, "pred_2nd": pred_2a, "pred_3rd": pred_3a, "formation": "A"})
-    if use_formation:
-        rows.append({**base, "pred_2nd": pred_2b, "pred_3rd": pred_3b, "formation": "B"})
+    close_time = g["close_time"].iloc[0] if "close_time" in g.columns else ""
+    pred_rows.append({
+        "race_id": race_id, "venue": g["venue_slug"].iloc[0],
+        "date": g["date"].iloc[0], "race_no": race_no,
+        "pred_1st": int(best["b1"]), "pred_2nd": int(best["b2"]), "pred_3rd": int(best["b3"]),
+        "combo_score": best["combo_score"],
+        "top_score": top_score, "score_gap": score_gap,
+        "close_time": close_time,
+    })
 
-rp = pd.DataFrame(rows)
-
-rp["score_gap"] = rp["race_id"].map(score_gap_raw)
-rp["top_score"] = rp["race_id"].map(top_score_raw)
-rp["n_players"] = rp["race_id"].map(n_players_raw)
-
-# ========== バンド別・的中率&平均払戻テーブル（訓練データから算出） ==========
-# 損益分岐払戻 = 100円 ÷ 的中率（例: 的中率6.6% → 1,515円必要）
-df_train_pay = df_all[df_all["date"] < TARGET_DATE].copy()
-df_train_pay[["_combo","_pay"]] = df_train_pay["san_ren_tan"].apply(
-    lambda x: pd.Series(parse_payout(x)))
-df_train_pay["_pay"] = pd.to_numeric(df_train_pay["_pay"], errors="coerce")
-# レース単位で集約
-race_stats = df_train_pay.groupby("race_id").agg(
-    _pay=("_pay","first"), _combo=("_combo","first")
-).reset_index()
-race_stats["top_score"] = race_stats["race_id"].map(top_score_raw)
-race_stats["score_gap"] = race_stats["race_id"].map(score_gap_raw)
-race_stats["n_players"] = race_stats["race_id"].map(n_players_raw)
-race_stats_f = race_stats[
-    (race_stats["top_score"] >= 95) &
-    (race_stats["score_gap"] >= 2) &
-    (race_stats["n_players"] == 7)
-].dropna(subset=["_pay"]).copy()
-
-def score_band(s):
-    if s < 100: return "95-100"
-    elif s < 105: return "100-105"
-    elif s < 110: return "105-110"
-    else: return "110+"
-
-def gap_band(g):
-    if g < 4: return "2-4"
-    elif g < 6: return "4-6"
-    elif g < 8: return "6-8"
-    else: return "8+"
-
-race_stats_f["score_band"] = race_stats_f["top_score"].apply(score_band)
-race_stats_f["gap_band"]   = race_stats_f["score_gap"].apply(gap_band)
-
-# バンド別: 平均払戻 & 予測的中率（訓練データ内の的中レースを近似）
-# 的中率は walkforward 結果に近い全体値を使い、バンド補正係数で調整
-# （バンドごとのサンプル数が少ないため全体平均6.6%をベースに使用）
-band_table = race_stats_f.groupby(
-    ["score_band","gap_band"], observed=True
-)["_pay"].agg(avg_payout="mean", race_count="count").reset_index()
-
-# 全体的中率（walkforward実績）から損益分岐払戻を算出
-OVERALL_HIT_RATE = 0.066  # walkforward実績値
-band_table["breakeven_payout"] = 100 / OVERALL_HIT_RATE  # ≈1,515円
-# 期待値 = avg_payout × hit_rate（損益分岐を超えているか）
-band_table["ev_per_bet"] = band_table["avg_payout"] * OVERALL_HIT_RATE
-
-rp["score_band"] = rp["top_score"].apply(score_band)
-rp["gap_band"]   = rp["score_gap"].apply(gap_band)
-rp = rp.merge(band_table[["score_band","gap_band","avg_payout","breakeven_payout","ev_per_bet"]],
-              on=["score_band","gap_band"], how="left")
-overall_avg = race_stats_f["_pay"].mean()
-rp["avg_payout"]      = rp["avg_payout"].fillna(overall_avg)
-rp["breakeven_payout"]= rp["breakeven_payout"].fillna(100 / OVERALL_HIT_RATE)
-rp["ev_per_bet"]      = rp["ev_per_bet"].fillna(overall_avg * OVERALL_HIT_RATE)
-
-# ========== フィルター & 時間帯絞り込み ==========
-# proba>=0.35は的中率が上がるがオッズが低くなり回収率92%に落ちるため除外
-MIN_EV = args.min_ev
-filtered = rp[
-    (rp["top_score"] >= 95) &
-    (rp["score_gap"] >= 2) &
-    (rp["n_players"] == 7) &
-    (rp["ev_per_bet"] >= MIN_EV) &
-    (rp["race_no"] >= RACE_RANGE[0]) &
-    (rp["race_no"] <= RACE_RANGE[1])
-].sort_values(["venue","race_no"])
-
-print(f"フィルター通過: {len(filtered)}件")
+print(f"予測レース数: {len(pred_rows)}")
 
 # ========== Discord投稿 ==========
-if filtered.empty:
-    msg = (f"**{TARGET_DATE} 予想 ({HOUR_JST}時台)**\n"
-           f"対象レースなし（race_no {RACE_RANGE[0]}〜{RACE_RANGE[1]}）")
-    post_discord(msg)
-    print("対象レースなし")
+if not pred_rows:
+    msg = f"**{TARGET_DATE} 予想 ({HOUR_JST}時台)**\n対象レースなし"
+    post_discord(msg); print(msg)
 else:
-    ev_note = f" / EV≥{MIN_EV:.0f}円" if MIN_EV > 0 else ""
-    lines = [f"**:checkered_flag: {TARGET_DATE} 競輪予想 ({HOUR_JST}時台)**",
-             f"フィルター: top_score≥95 & gap≥2 & 7車限定{ev_note}",
-             f"対象: {len(filtered)}レース\n"]
-
-    # レース単位でA/Bをまとめて表示
-    for race_id, race_rows in filtered.groupby("race_id", sort=False):
-        race_rows = race_rows.sort_values("formation")
-        row = race_rows.iloc[0]
-        ct = row.get("close_time", "")
-        time_str   = f"  締切: {ct}" if ct and str(ct) != "nan" else ""
-        avg_pay    = int(row["avg_payout"])       if pd.notna(row["avg_payout"])       else 0
-        breakeven  = int(row["breakeven_payout"]) if pd.notna(row["breakeven_payout"]) else 0
-        ev_per_bet = int(row["ev_per_bet"])        if pd.notna(row["ev_per_bet"])        else 0
-        ev_sign = "+" if avg_pay >= breakeven else "-"
-
-        combos = []
-        for _, r in race_rows.iterrows():
-            p2 = int(r["pred_2nd"]) if pd.notna(r["pred_2nd"]) else "?"
-            p3 = int(r["pred_3rd"]) if pd.notna(r["pred_3rd"]) else "?"
-            combos.append(f"`{int(r['pred_1st'])}-{p2}-{p3}`")
-        combo_str = "  /  ".join(combos)
-        n_combos  = len(race_rows)
-        p2gap     = float(row["p2_gap"]) if "p2_gap" in row and pd.notna(row["p2_gap"]) else 0
-        formation_label = f"{'接戦→2通り' if n_combos > 1 else '確信→1通り'} (p2gap:{p2gap:.3f})"
-
+    lines = [
+        f"**:checkered_flag: {TARGET_DATE} 競輪予想 ({HOUR_JST}時台) [コンボモデル]**",
+        f"対象: {len(pred_rows)}レース（1レース1点）\n"
+    ]
+    for r in sorted(pred_rows, key=lambda x: (x["venue"], x["race_no"])):
+        ct = r.get("close_time","")
+        time_str = f"  締切:{ct}" if ct and str(ct) != "nan" else ""
         lines.append(
-            f":round_pushpin: **{row['venue']} {int(row['race_no'])}R**{time_str}\n"
-            f"  予想: {combo_str}  [{formation_label}]\n"
-            f"  score: {row['top_score']:.1f} / gap: {row['score_gap']:.1f}\n"
-            f"  平均払戻: {avg_pay:,}円 / 損益分岐: {breakeven:,}円 / 期待値: {ev_sign}{ev_per_bet - 100:,}円"
+            f":round_pushpin: **{r['venue']} {r['race_no']}R**{time_str}\n"
+            f"  予想: `{r['pred_1st']}-{r['pred_2nd']}-{r['pred_3rd']}`\n"
+            f"  score:{r['top_score']:.0f} gap:{r['score_gap']:.1f}  (combo_score:{r['combo_score']:.4f})"
         )
-
     msg = "\n".join(lines)
     print(msg)
     post_discord(msg)

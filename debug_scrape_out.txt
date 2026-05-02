@@ -1,0 +1,52 @@
+race: utsunomiya / 2420260101010001
+
+table[0]: score=True style=True name=True
+  → 出走表として選択！
+table[1]: score=True style=True name=True
+table[2]: score=True style=False name=True
+table[3]: score=True style=True name=True
+table[4]: score=True style=True name=True
+table[5]: score=True style=True name=True
+table[6]: score=False style=False name=False
+table[7]: score=False style=False name=False
+table[8]: score=False style=False name=False
+table[9]: score=False style=False name=False
+table[10]: score=False style=False name=False
+table[11]: score=False style=False name=False
+table[12]: score=False style=False name=False
+table[13]: score=False style=False name=False
+table[14]: score=False style=False name=False
+table[15]: score=False style=False name=False
+table[16]: score=False style=False name=False
+table[17]: score=False style=False name=False
+table[18]: score=False style=False name=False
+table[19]: score=False style=False name=False
+table[20]: score=False style=False name=False
+table[21]: score=False style=False name=False
+table[22]: score=False style=False name=False
+table[23]: score=False style=False name=False
+table[24]: score=False style=False name=False
+table[25]: score=False style=False name=False
+table[26]: score=False style=False name=False
+table[27]: score=False style=False name=False
+table[28]: score=False style=False name=False
+table[29]: score=False style=False name=False
+table[30]: score=False style=False name=False
+table[31]: score=False style=False name=False
+table[32]: score=False style=False name=False
+table[33]: score=False style=False name=True
+table[34]: score=False style=False name=True
+table[35]: score=False style=False name=False
+
+選択テーブル列名:
+['予 想 予 想', '好 気 合 好 気 合', '総 評 総 評', '枠 番 枠 番', '車 番 車 番', '選手名 府県/年齢/期別 選手名 府県/年齢/期別', '級 班 級 班', '脚 質 脚 質', 'ギヤ 倍数 ギヤ 倍数', '直近4ヶ月の成績 競走得点', '直近4ヶ月の成績 S', '直近4ヶ月の成績 B', '直近4ヶ月の成績 逃', '直近4ヶ月の成績 捲', '直近4ヶ月の成績 差', '直近4ヶ月の成績 マ', '直近4ヶ月の成績 1 着', '直近4ヶ月の成績 2 着', '直近4ヶ月の成績 3 着', '直近4ヶ月の成績 着 外', '直近4ヶ月の成績 勝 率', '直近4ヶ月の成績 2連 対率', '直近4ヶ月の成績 3連 対率']
+
+col_win_rate(['勝 率']): 直近4ヶ月の成績 勝 率
+col_win_rate2(['勝率']): None
+col_top2_rate(['2連']): 直近4ヶ月の成績 2連 対率
+col_top3_rate(['3連']): 直近4ヶ月の成績 3連 対率
+col_nige_4m(['直近', '逃']): 直近4ヶ月の成績 逃
+col_nige_4m2(['4ヶ月', '逃']): 直近4ヶ月の成績 逃
+col_maku_4m(['直近', '捲']): 直近4ヶ月の成績 捲
+col_mark(['予 想']): 予 想 予 想
+col_mark2(['予想']): None
