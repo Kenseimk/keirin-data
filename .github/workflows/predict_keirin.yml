@@ -44,7 +44,7 @@ jobs:
           python-version: '3.11'
 
       - name: 依存パッケージインストール
-        run: pip install lightgbm numpy pandas requests beautifulsoup4 tqdm scikit-learn
+        run: pip install lightgbm numpy pandas requests beautifulsoup4 tqdm scikit-learn lxml
 
       - name: 対象日決定
         id: set_date
@@ -105,7 +105,7 @@ jobs:
           python-version: '3.11'
 
       - name: 依存パッケージインストール
-        run: pip install lightgbm numpy pandas requests beautifulsoup4 tqdm scikit-learn
+        run: pip install lightgbm numpy pandas requests beautifulsoup4 tqdm scikit-learn lxml
 
       - name: 対象日決定
         id: set_params
