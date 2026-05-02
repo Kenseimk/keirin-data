@@ -136,6 +136,34 @@ honmei_score = df_all[df_all["is_honmei"]==1].set_index("race_id")["race_score"]
 df_all["honmei_style_num"]  = df_all["race_id"].map(honmei_style)
 df_all["honmei_race_score"] = df_all["race_id"].map(honmei_score)
 
+# ライン特徴量
+df_all["line_size"] = df_all.groupby(["race_id","pref"])["banum"].transform("count")
+n_strong_s = df_all.groupby("race_id").apply(
+    lambda g: int((g.groupby("pref")["banum"].count() >= 2).sum())
+).rename("n_strong_lines")
+df_all = df_all.join(n_strong_s, on="race_id")
+
+def extract_markers(x):
+    if pd.isna(x): return {}
+    res = {}
+    for sym, key in [("○","niban"),("▲","attention"),("△","sanban")]:
+        mk = re.search(re.escape(sym) + r"(\d+)", str(x))
+        if mk: res[key] = int(mk.group(1))
+    return res
+
+_mdf = df_all.drop_duplicates("race_id")[["race_id","lineup"]].copy()
+_mdf["_mk"] = _mdf["lineup"].apply(extract_markers)
+_mdf["lineup_niban"]  = _mdf["_mk"].apply(lambda d: d.get("niban"))
+_mdf["lineup_sanban"] = _mdf["_mk"].apply(lambda d: d.get("sanban"))
+_mdf["lineup_attn"]   = _mdf["_mk"].apply(lambda d: d.get("attention"))
+_mdf = _mdf.set_index("race_id")
+df_all["lineup_niban"]  = df_all["race_id"].map(_mdf["lineup_niban"])
+df_all["lineup_sanban"] = df_all["race_id"].map(_mdf["lineup_sanban"])
+df_all["lineup_attn"]   = df_all["race_id"].map(_mdf["lineup_attn"])
+df_all["is_niban"]  = (df_all["banum"] == df_all["lineup_niban"]).astype(int)
+df_all["is_sanban"] = (df_all["banum"] == df_all["lineup_sanban"]).astype(int)
+df_all["is_attn"]   = (df_all["banum"] == df_all["lineup_attn"]).astype(int)
+
 def calc_gap(x):
     s = sorted(x.dropna(), reverse=True)
     return s[0]-s[1] if len(s)>=2 else np.nan
@@ -155,7 +183,8 @@ F23 = F1 + ["honmei_style_num","honmei_race_score"]
 PLAYER_COLS = ["race_score","class_num","style_num","gear","last3_avg_rank","last5_avg_rank",
                "last5_win_rate","win_rate_4m","top2_rate_4m","top3_rate_4m","nige_4m","maku_4m",
                "venue_win_rate","same_pref_count","same_term_count","days_since_last",
-               "age","is_nige_finish","is_sashi_finish","score_rank","is_honmei"]
+               "age","is_nige_finish","is_sashi_finish","score_rank","is_honmei",
+               "line_size","is_niban","is_sanban","is_attn"]
 
 COMBO_FEATS = [
     "p1_win_proba","p1_score","p1_class","p1_style","p1_win_rate",
@@ -174,6 +203,10 @@ COMBO_FEATS = [
     "prob_product","prob_sum_log","win_proba_gap",
     "banum_12","banum_13",
     "score_gap_race","top_score",
+    "p1_line_size","p2_line_size","p3_line_size","n_strong_lines",
+    "b2_is_b1_bankey","b3_in_b1_line","b3_in_b2_line",
+    "p2_is_niban","p3_is_sanban","p2_is_attn",
+    "b1_honmei_b2_niban","b1_honmei_b2_niban_b3_sanban",
 ]
 
 req = ["race_score","class_num","style_num","gear","score_rank","is_honmei",
@@ -232,6 +265,7 @@ def make_combo_rows(df_part, is_train=True):
                 try: correct_1, correct_2, correct_3 = int(parts[0]), int(parts[1]), int(parts[2])
                 except: pass
 
+        n_strong = int(g["n_strong_lines"].iloc[0])
         top1_cands = g.nlargest(TOP_K, "win_proba")["banum"].astype(int).tolist()
         top2_cands = g.nlargest(TOP_K, "p2_proba")["banum"].astype(int).tolist()
         top3_cands = g.nlargest(TOP_K, "p3_proba")["banum"].astype(int).tolist()
@@ -284,7 +318,16 @@ def make_combo_rows(df_part, is_train=True):
                 "prob_sum_log": np.log(float(p1["win_proba"])+1e-9)+np.log(float(p2["p2_proba"])+1e-9)+np.log(float(p3["p3_proba"])+1e-9),
                 "win_proba_gap": float(p1["win_proba"])-float(p2["win_proba"]),
                 "banum_12": b2-b1, "banum_13": b3-b1,
-                "score_gap_race": score_gap, "is_hit": int(b1==correct_1 and b2==correct_2 and b3==correct_3),
+                "score_gap_race": score_gap,
+                "p1_line_size": float(p1["line_size"]), "p2_line_size": float(p2["line_size"]), "p3_line_size": float(p3["line_size"]),
+                "n_strong_lines": n_strong,
+                "b2_is_b1_bankey": int((s1n or s1m) and sp12),
+                "b3_in_b1_line": int(sp13 and not sp12),
+                "b3_in_b2_line": int(sp23 and not sp13),
+                "p2_is_niban": int(p2["is_niban"]), "p3_is_sanban": int(p3["is_sanban"]), "p2_is_attn": int(p2["is_attn"]),
+                "b1_honmei_b2_niban": int(bool(p1["is_honmei"]) and bool(p2["is_niban"])),
+                "b1_honmei_b2_niban_b3_sanban": int(bool(p1["is_honmei"]) and bool(p2["is_niban"]) and bool(p3["is_sanban"])),
+                "is_hit": int(b1==correct_1 and b2==correct_2 and b3==correct_3),
             })
     return pd.DataFrame(rows)
 
@@ -306,6 +349,12 @@ m_combo.fit(
     callbacks=[lgb.early_stopping(100, verbose=False, first_metric_only=True), lgb.log_evaluation(-1)]
 )
 print(f"コンボモデル best iter: {m_combo.best_iteration_}")
+
+# バリデーションセットからコンボスコア閾値を決定 (上位10%, テストデータ不使用)
+combo_val["combo_score"] = m_combo.predict_proba(combo_val[COMBO_FEATS].values)[:,1]
+val_top1 = combo_val.groupby("race_id")["combo_score"].max().reset_index()
+COMBO_THRESHOLD = np.percentile(val_top1["combo_score"], 90)
+print(f"コンボ閾値 (val上位10%): {COMBO_THRESHOLD:.4f}")
 
 # ========== 当日データで予測 ==========
 df_today = df_all[df_all["date"] == TARGET_DATE].dropna(subset=req[:-1]).copy()
@@ -329,6 +378,7 @@ for race_id, g in df_today.groupby("race_id"):
         continue
 
     g = g.copy()
+    n_strong = int(g["n_strong_lines"].iloc[0])
     top1_cands = g.nlargest(TOP_K, "win_proba")["banum"].astype(int).tolist()
     top2_cands = g.nlargest(TOP_K, "p2_proba")["banum"].astype(int).tolist()
     top3_cands = g.nlargest(TOP_K, "p3_proba")["banum"].astype(int).tolist()
@@ -379,6 +429,14 @@ for race_id, g in df_today.groupby("race_id"):
             "win_proba_gap": float(p1["win_proba"])-float(p2["win_proba"]),
             "banum_12": b2-b1, "banum_13": b3-b1,
             "score_gap_race": score_gap, "top_score": top_score,
+            "p1_line_size": float(p1["line_size"]), "p2_line_size": float(p2["line_size"]), "p3_line_size": float(p3["line_size"]),
+            "n_strong_lines": n_strong,
+            "b2_is_b1_bankey": int((s1n or s1m) and sp12),
+            "b3_in_b1_line": int(sp13 and not sp12),
+            "b3_in_b2_line": int(sp23 and not sp13),
+            "p2_is_niban": int(p2["is_niban"]), "p3_is_sanban": int(p3["is_sanban"]), "p2_is_attn": int(p2["is_attn"]),
+            "b1_honmei_b2_niban": int(bool(p1["is_honmei"]) and bool(p2["is_niban"])),
+            "b1_honmei_b2_niban_b3_sanban": int(bool(p1["is_honmei"]) and bool(p2["is_niban"]) and bool(p3["is_sanban"])),
         })
 
     if not combo_rows: continue
@@ -392,11 +450,13 @@ for race_id, g in df_today.groupby("race_id"):
         "date": g["date"].iloc[0], "race_no": race_no,
         "pred_1st": int(best["b1"]), "pred_2nd": int(best["b2"]), "pred_3rd": int(best["b3"]),
         "combo_score": best["combo_score"],
+        "passes_threshold": bool(best["combo_score"] >= COMBO_THRESHOLD),
         "top_score": top_score, "score_gap": score_gap,
         "close_time": close_time,
     })
 
-print(f"予測レース数: {len(pred_rows)}")
+n_high = sum(1 for r in pred_rows if r["passes_threshold"])
+print(f"予測レース数: {len(pred_rows)} (高信頼度★: {n_high})")
 
 # ========== Discord投稿 ==========
 if not pred_rows:
@@ -404,16 +464,17 @@ if not pred_rows:
     post_discord(msg); print(msg)
 else:
     lines = [
-        f"**:checkered_flag: {TARGET_DATE} 競輪予想 ({HOUR_JST}時台) [コンボモデル]**",
-        f"対象: {len(pred_rows)}レース（1レース1点）\n"
+        f"**:checkered_flag: {TARGET_DATE} 競輪予想 ({HOUR_JST}時台) [ラインモデル]**",
+        f"対象: {len(pred_rows)}レース  ★高信頼度(上位10%): {n_high}レース\n"
     ]
     for r in sorted(pred_rows, key=lambda x: (x["venue"], x["race_no"])):
         ct = r.get("close_time","")
         time_str = f"  締切:{ct}" if ct and str(ct) != "nan" else ""
+        star = "★" if r["passes_threshold"] else "  "
         lines.append(
-            f":round_pushpin: **{r['venue']} {r['race_no']}R**{time_str}\n"
+            f"{star}:round_pushpin: **{r['venue']} {r['race_no']}R**{time_str}\n"
             f"  予想: `{r['pred_1st']}-{r['pred_2nd']}-{r['pred_3rd']}`\n"
-            f"  score:{r['top_score']:.0f} gap:{r['score_gap']:.1f}  (combo_score:{r['combo_score']:.4f})"
+            f"  score:{r['top_score']:.0f} gap:{r['score_gap']:.1f}  (combo:{r['combo_score']:.4f})"
         )
     msg = "\n".join(lines)
     print(msg)

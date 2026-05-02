@@ -1,0 +1,117 @@
+name: keirin-predict-notify
+
+on:
+  schedule:
+    # 09:00 JST (UTC 00:00) - 序盤レース (1〜4R)
+    - cron: '0 0 * * *'
+    # 12:00 JST (UTC 03:00) - 中盤レース (5〜9R)
+    - cron: '0 3 * * *'
+    # 16:00 JST (UTC 07:00) - 終盤レース (10〜12R)
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: '予想日 YYYY-MM-DD (省略=今日)'
+        default: ''
+        required: false
+      hour:
+        description: 'JST時刻 (省略=実行時刻に合わせて自動判定)'
+        default: ''
+        required: false
+      all_races:
+        description: '全レース予想 (true=全R / false=時刻フィルタ)'
+        default: 'false'
+        required: false
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 依存パッケージインストール
+        run: pip install lightgbm numpy pandas requests beautifulsoup4 tqdm scikit-learn
+
+      - name: 対象日・時刻決定
+        id: set_params
+        run: |
+          python3 - << 'PYEOF'
+          import os, datetime
+
+          # 対象日
+          input_date = os.environ.get('INPUT_DATE', '').strip()
+          if input_date:
+              target = input_date
+          else:
+              # UTC→JST (+9h)
+              jst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+              target = jst.strftime('%Y-%m-%d')
+
+          # JST時刻
+          input_hour = os.environ.get('INPUT_HOUR', '').strip()
+          if input_hour:
+              hour = int(input_hour)
+          else:
+              jst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+              hour = jst.hour
+
+          print(f'対象日: {target}  JST {hour}時')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'target_date={target}\n')
+              f.write(f'hour={hour}\n')
+          PYEOF
+        env:
+          INPUT_DATE: ${{ github.event.inputs.date }}
+          INPUT_HOUR: ${{ github.event.inputs.hour }}
+
+      - name: 今日の出走データ取得
+        run: |
+          python scripts/scrape_day.py --date ${{ steps.set_params.outputs.target_date }}
+        continue-on-error: true
+
+      - name: 予測 & Discord通知
+        run: |
+          if [ "${{ github.event.inputs.all_races }}" = "true" ]; then
+            python scripts/predict_today.py \
+              --date ${{ steps.set_params.outputs.target_date }} \
+              --all
+          else
+            python scripts/predict_today.py \
+              --date ${{ steps.set_params.outputs.target_date }} \
+              --hour ${{ steps.set_params.outputs.hour }}
+          fi
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+      - name: エラー時Discord通知
+        if: failure()
+        run: |
+          python3 - << 'PYEOF'
+          import requests, os
+          webhook = os.environ.get('DISCORD_WEBHOOK_URL', '')
+          if not webhook:
+              exit(0)
+          run_url = (
+              'https://github.com/'
+              + os.environ.get('GITHUB_REPOSITORY', '')
+              + '/actions/runs/'
+              + os.environ.get('GITHUB_RUN_ID', '')
+          )
+          requests.post(
+              webhook,
+              json={'content': f'🚨 競輪予測エラー: {run_url}'},
+              timeout=10
+          )
+          PYEOF
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
