@@ -412,7 +412,8 @@ for race_id, g in df_today.groupby("race_id"):
     n_players = n_players_raw.get(race_id, 0)
     race_no   = int(g["race_no"].iloc[0])
 
-    if n_players != 7 or not (RACE_RANGE[0] <= race_no <= RACE_RANGE[1]):
+    if (top_score < TOP_SCORE_THRESH or score_gap < SCORE_GAP_THRESH
+            or n_players != 7 or not (RACE_RANGE[0] <= race_no <= RACE_RANGE[1])):
         continue
 
     g = g.copy()
