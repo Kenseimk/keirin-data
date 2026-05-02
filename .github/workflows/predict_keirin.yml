@@ -2,7 +2,9 @@ name: keirin-predict-notify
 
 on:
   schedule:
-    # 08:00 JST (UTC 前日23:00) - 全レース一括予想
+    # Job 1: 22:00 JST (13:00 UTC) - 当日結果スクレイプ & CSV更新
+    - cron: '0 13 * * *'
+    # Job 2: 08:00 JST (23:00 UTC 前日) - 全レース予測 & Discord通知
     - cron: '0 23 * * *'
   workflow_dispatch:
     inputs:
@@ -10,9 +12,88 @@ on:
         description: '予想日 YYYY-MM-DD (省略=今日)'
         default: ''
         required: false
+      phase:
+        description: '実行フェーズ'
+        default: 'predict'
+        required: false
+        type: choice
+        options:
+          - predict
+          - scrape
+          - both
 
+# ─────────────────────────────────────────────────────────
+# Job 1: 22:00 JST — 当日レース結果スクレイプ & CSV コミット
+# ─────────────────────────────────────────────────────────
 jobs:
-  predict:
+  nightly-scrape:
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '0 13 * * *') ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.phase == 'scrape' || github.event.inputs.phase == 'both'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 依存パッケージインストール
+        run: pip install lightgbm numpy pandas requests beautifulsoup4 tqdm scikit-learn
+
+      - name: 対象日決定
+        id: set_date
+        run: |
+          python3 - << 'PYEOF'
+          import os, datetime
+          jst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+          target = jst.strftime('%Y-%m-%d')
+          print(f'対象日: {target}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'target_date={target}\n')
+          PYEOF
+
+      - name: 当日結果スクレイプ
+        run: python scripts/scrape_day.py --date ${{ steps.set_date.outputs.target_date }}
+
+      - name: CSV をコミット & プッシュ
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add keirin_data/*.csv
+          git diff --cached --quiet && echo "変更なし" || (
+            git commit -m "🚴 競輪データ自動更新 ${{ steps.set_date.outputs.target_date }}"
+            git push
+          )
+
+      - name: エラー時Discord通知
+        if: failure()
+        run: |
+          python3 - << 'PYEOF'
+          import requests, os
+          webhook = os.environ.get('DISCORD_WEBHOOK_URL', '')
+          if not webhook:
+              exit(0)
+          run_url = ('https://github.com/' + os.environ.get('GITHUB_REPOSITORY', '')
+                     + '/actions/runs/' + os.environ.get('GITHUB_RUN_ID', ''))
+          requests.post(webhook, json={'content': f'🚨 競輪スクレイプエラー: {run_url}'}, timeout=10)
+          PYEOF
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+# ─────────────────────────────────────────────────────────
+# Job 2: 08:00 JST — 全レース予測 & Discord通知
+# ─────────────────────────────────────────────────────────
+  morning-predict:
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '0 23 * * *') ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.phase == 'predict' || github.event.inputs.phase == 'both'))
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -31,15 +112,12 @@ jobs:
         run: |
           python3 - << 'PYEOF'
           import os, datetime
-
           input_date = os.environ.get('INPUT_DATE', '').strip()
           if input_date:
               target = input_date
           else:
-              # UTC→JST (+9h)
               jst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
               target = jst.strftime('%Y-%m-%d')
-
           print(f'対象日: {target}')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f'target_date={target}\n')
@@ -47,9 +125,8 @@ jobs:
         env:
           INPUT_DATE: ${{ github.event.inputs.date }}
 
-      - name: 今日の出走データ取得
-        run: |
-          python scripts/scrape_day.py --date ${{ steps.set_params.outputs.target_date }}
+      - name: 当日出走データ取得
+        run: python scripts/scrape_day.py --date ${{ steps.set_params.outputs.target_date }}
         continue-on-error: true
 
       - name: 予測 & Discord通知
@@ -68,17 +145,9 @@ jobs:
           webhook = os.environ.get('DISCORD_WEBHOOK_URL', '')
           if not webhook:
               exit(0)
-          run_url = (
-              'https://github.com/'
-              + os.environ.get('GITHUB_REPOSITORY', '')
-              + '/actions/runs/'
-              + os.environ.get('GITHUB_RUN_ID', '')
-          )
-          requests.post(
-              webhook,
-              json={'content': f'🚨 競輪予測エラー: {run_url}'},
-              timeout=10
-          )
+          run_url = ('https://github.com/' + os.environ.get('GITHUB_REPOSITORY', '')
+                     + '/actions/runs/' + os.environ.get('GITHUB_RUN_ID', ''))
+          requests.post(webhook, json={'content': f'🚨 競輪予測エラー: {run_url}'}, timeout=10)
           PYEOF
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
