@@ -11,8 +11,9 @@ if hasattr(sys.stderr, 'buffer'):
 実行タイミング: JST 10:00 / 12:00 / 14:00 / 16:00
 """
 
-import os, glob, re, warnings, requests, argparse, itertools
+import os, glob, re, warnings, requests, argparse, itertools, time
 from datetime import datetime, timezone, timedelta
+from bs4 import BeautifulSoup
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
@@ -49,6 +50,36 @@ def post_discord(content: str):
     r = requests.post(DISCORD_WEBHOOK, json={"content": content}, timeout=10)
     if r.status_code not in (200, 204):
         print(f"[Discord] 投稿失敗: {r.status_code} {r.text}")
+
+def fetch_close_times(venue_slug):
+    """会場ページから締切時間を取得 → {race_no(int): 'HH:MM'}"""
+    try:
+        resp = requests.get(
+            f"https://keirin.kdreams.jp/{venue_slug}/",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            timeout=10
+        )
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tbl in soup.find_all("table"):
+            trows = tbl.find_all("tr")
+            race_row = time_row = None
+            for tr in trows:
+                cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+                if cells and "1R" in cells:
+                    race_row = cells
+                if cells and any("締切時間" in c for c in cells):
+                    time_row = cells
+            if race_row and time_row:
+                result = {}
+                for rc, tc in zip(race_row, time_row):
+                    rm = re.search(r"(\d+)R", rc)
+                    tm = re.search(r"(\d{1,2}:\d{2})", tc)
+                    if rm and tm:
+                        result[int(rm.group(1))] = tm.group(1)
+                return result
+    except Exception:
+        pass
+    return {}
 
 # ========== データ読み込み ==========
 TOP_K = 5
@@ -366,6 +397,14 @@ df_today["win_proba"] = m1.predict_proba(df_today[F1].values)[:,1]
 df_today["p2_proba"]  = m2.predict_proba(df_today[F23].values)[:,1]
 df_today["p3_proba"]  = m3.predict_proba(df_today[F23].values)[:,1]
 
+# 会場ごとの締切時間を取得 (CSVにない場合は会場ページから直接取得)
+print("締切時間を取得中...")
+venue_close = {}
+for venue in df_today["venue_slug"].unique():
+    venue_close[venue] = fetch_close_times(venue)
+    time.sleep(1)
+print(f"  取得会場数: {sum(1 for v in venue_close if venue_close[v])}/{len(venue_close)}")
+
 pred_rows = []
 for race_id, g in df_today.groupby("race_id"):
     top_score = top_score_raw.get(race_id, 0)
@@ -444,7 +483,10 @@ for race_id, g in df_today.groupby("race_id"):
     combo_df["combo_score"] = m_combo.predict_proba(combo_df[COMBO_FEATS].values)[:,1]
     best = combo_df.nlargest(1, "combo_score").iloc[0]
 
-    close_time = g["close_time"].iloc[0] if "close_time" in g.columns else ""
+    ct_val = g["close_time"].iloc[0] if "close_time" in g.columns else None
+    if pd.isna(ct_val) or str(ct_val).strip() in ("", "nan"):
+        ct_val = venue_close.get(g["venue_slug"].iloc[0], {}).get(race_no, "")
+    close_time = str(ct_val) if ct_val else ""
     pred_rows.append({
         "race_id": race_id, "venue": g["venue_slug"].iloc[0],
         "date": g["date"].iloc[0], "race_no": race_no,
