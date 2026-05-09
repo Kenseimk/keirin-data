@@ -68,6 +68,7 @@ jobs:
           git add keirin_data/*.csv
           git diff --cached --quiet && echo "変更なし" || (
             git commit -m "🚴 競輪データ自動更新 ${{ steps.set_date.outputs.target_date }}"
+            git pull --rebase origin main
             git push
           )
 
