@@ -51,12 +51,18 @@ jobs:
         run: |
           python3 - << 'PYEOF'
           import os, datetime
-          jst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
-          target = jst.strftime('%Y-%m-%d')
+          input_date = os.environ.get('INPUT_DATE', '').strip()
+          if input_date:
+              target = input_date
+          else:
+              jst = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+              target = jst.strftime('%Y-%m-%d')
           print(f'対象日: {target}')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f'target_date={target}\n')
           PYEOF
+        env:
+          INPUT_DATE: ${{ github.event.inputs.date }}
 
       - name: 当日結果スクレイプ
         run: python scripts/scrape_day.py --date ${{ steps.set_date.outputs.target_date }}
