@@ -408,6 +408,59 @@ print(f"  取得会場数: {sum(1 for v in venue_close if venue_close[v])}/{len(
 STYLE_LABEL = {5:"逃", 4:"捲", 3:"両", 2:"差", 1:"追", 0:"マ"}
 CLASS_LABEL  = {4:"S1", 3:"S2", 2:"A1", 1:"A2", 0:"B"}
 
+# 各競輪場のコース特性
+VENUE_INFO = {
+    # ===== 333m 短バンク =====
+    "yahiko":      {"len":333, "slope":33.0, "note":"短バンク・急カーブ。逃げ・捲り有利。直線短く差し届きにくい"},
+    "matsusaka":   {"len":333, "slope":32.0, "note":"短バンク。ホームストレートが短く番手勝負になりやすい"},
+    "kumamoto":    {"len":333, "slope":30.0, "note":"短バンク。逃げ粘りやすく先行有利。捲りも決まりやすい"},
+    "kochi":       {"len":333, "slope":31.0, "note":"短バンク。直線短く先行・番手の組み合わせで決まりやすい"},
+    "kouchi":      {"len":333, "slope":31.0, "note":"短バンク。直線短く先行・番手の組み合わせで決まりやすい"},
+    "fukui":       {"len":333, "slope":30.5, "note":"短バンク。逃げ有利・差し届きにくいコース"},
+    "kagoshima":   {"len":333, "slope":31.0, "note":"短バンク。先行争い激化しやすく番手の有利大"},
+    "ogaki":       {"len":333, "slope":34.0, "note":"短バンク・急傾斜。逃げ・捲り強め"},
+    "nakatsu":     {"len":333, "slope":31.0, "note":"短バンク。先行有利"},
+    "takamatsu":   {"len":333, "slope":32.0, "note":"短バンク。逃げ粘りやすい"},
+    "beppu":       {"len":333, "slope":30.0, "note":"短バンク。先行系有利"},
+    "utsunomiya":  {"len":333, "slope":31.5, "note":"短バンク。逃げ・捲り有利"},
+    "izu":         {"len":333, "slope":32.0, "note":"短バンク（室内）。逃げ非常に粘りやすい特殊環境"},
+    # ===== 400m 標準バンク =====
+    "hakodate":    {"len":400, "slope":30.0, "note":"標準バンク。バランス型。風の影響やや大きい"},
+    "aomori":      {"len":400, "slope":31.5, "note":"標準バンク。直線長め。差しも届く"},
+    "morioka":     {"len":400, "slope":32.0, "note":"標準バンク。バランス型"},
+    "sendai":      {"len":400, "slope":30.0, "note":"標準バンク。差し・追込が届きやすい"},
+    "keiokaku":    {"len":400, "slope":32.0, "note":"標準バンク（屋外）。直線長く差し有利傾向"},
+    "hiratsuka":   {"len":400, "slope":31.5, "note":"標準バンク。海風の影響あり。差し届きやすい"},
+    "oi":          {"len":400, "slope":30.0, "note":"標準バンク。バランス型"},
+    "niigata":     {"len":400, "slope":30.5, "note":"標準バンク。バランス型"},
+    "toyama":      {"len":400, "slope":31.0, "note":"標準バンク。バランス型。差しも決まる"},
+    "kanazawa":    {"len":400, "slope":31.0, "note":"標準バンク。バランス型"},
+    "gifu":        {"len":400, "slope":31.5, "note":"標準バンク。直線長め。差し・追込が届く"},
+    "nagoya":      {"len":400, "slope":32.0, "note":"標準バンク。バランス型"},
+    "kishiwada":   {"len":400, "slope":34.0, "note":"標準バンク・急傾斜。先行有利だが捲りも決まる"},
+    "nara":        {"len":400, "slope":34.0, "note":"標準バンク・急傾斜。先行有利。捲り選手にも注意"},
+    "wakayama":    {"len":400, "slope":32.0, "note":"標準バンク。バランス型"},
+    "hiroshima":   {"len":400, "slope":30.0, "note":"標準バンク。直線長め。差しが届きやすい"},
+    "hofu":        {"len":400, "slope":34.0, "note":"標準バンク・急傾斜。先行有利傾向"},
+    "takamatsu2":  {"len":400, "slope":33.0, "note":"標準バンク。バランス型"},
+    "tokushima":   {"len":400, "slope":32.5, "note":"標準バンク。バランス型"},
+    "imabari":     {"len":400, "slope":33.0, "note":"標準バンク。バランス型"},
+    "toride":      {"len":400, "slope":31.0, "note":"標準バンク。直線長く風の影響大。差し・追込が届きやすい"},
+    "maebashi":    {"len":400, "slope":32.0, "note":"標準バンク。バランス型"},
+    "takasaki":    {"len":400, "slope":32.0, "note":"標準バンク。バランス型"},
+    "omiya":       {"len":400, "slope":31.5, "note":"標準バンク。差しも届く"},
+    "yahiko2":     {"len":400, "slope":30.0, "note":"標準バンク。バランス型"},
+    # ===== 500m 長バンク =====
+    "narita":      {"len":500, "slope":28.0, "note":"長バンク。直線長く差し・追込が強い。逃げは苦しい"},
+    "chiba":       {"len":500, "slope":28.0, "note":"長バンク。差し・追込有利。逃げの粘り厳しい"},
+}
+
+def get_venue_note(venue_slug):
+    info = VENUE_INFO.get(venue_slug)
+    if info:
+        return f"{info['len']}mバンク(傾斜{info['slope']}°) — {info['note']}"
+    return "コース情報未登録"
+
 def build_race_summary(g, b1, b2, b3):
     """レースの特徴をテキストサマリーにして返す"""
     g = g.copy().sort_values("banum")
@@ -464,7 +517,12 @@ def build_race_summary(g, b1, b2, b3):
     # n_strong_lines
     n_strong = int(g["n_strong_lines"].iloc[0]) if "n_strong_lines" in g.columns else 0
 
+    # コース情報
+    venue_slug = g["venue_slug"].iloc[0] if "venue_slug" in g.columns else ""
+    course_note = get_venue_note(venue_slug)
+
     lines_out = [
+        f"  コース: {course_note}",
         f"  ライン: {line_str}  強ライン{n_strong}本",
         f"  得点上位: {top3_str}",
         f"  {nige_str}",
