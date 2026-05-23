@@ -388,14 +388,16 @@ COMBO_THRESHOLD = np.percentile(val_top1["combo_score"], 90)
 print(f"コンボ閾値 (val上位10%): {COMBO_THRESHOLD:.4f}")
 
 # ========== 当日データで予測 ==========
-df_today = df_all[df_all["date"] == TARGET_DATE].dropna(subset=req[:-1]).copy()
+# 予測時は race_score/banum のみ必須。過去履歴系NaN(prev1_rank等)はLGBMが内部処理
+df_today = df_all[df_all["date"] == TARGET_DATE].dropna(subset=["race_score","banum"]).copy()
 if df_today.empty:
     msg = f"**{TARGET_DATE} の予想データがありません**"
     post_discord(msg); print(msg); sys.exit(0)
+print(f"当日データ: {len(df_today)}行")
 
-df_today["win_proba"] = m1.predict_proba(df_today[F1].values)[:,1]
-df_today["p2_proba"]  = m2.predict_proba(df_today[F23].values)[:,1]
-df_today["p3_proba"]  = m3.predict_proba(df_today[F23].values)[:,1]
+df_today["win_proba"] = m1.predict_proba(df_today[F1].fillna(0).values)[:,1]
+df_today["p2_proba"]  = m2.predict_proba(df_today[F23].fillna(0).values)[:,1]
+df_today["p3_proba"]  = m3.predict_proba(df_today[F23].fillna(0).values)[:,1]
 
 # 会場ごとの締切時間を取得 (CSVにない場合は会場ページから直接取得)
 print("締切時間を取得中...")
