@@ -405,6 +405,74 @@ for venue in df_today["venue_slug"].unique():
     time.sleep(1)
 print(f"  取得会場数: {sum(1 for v in venue_close if venue_close[v])}/{len(venue_close)}")
 
+STYLE_LABEL = {5:"逃", 4:"捲", 3:"両", 2:"差", 1:"追", 0:"マ"}
+CLASS_LABEL  = {4:"S1", 3:"S2", 2:"A1", 1:"A2", 0:"B"}
+
+def build_race_summary(g, b1, b2, b3):
+    """レースの特徴をテキストサマリーにして返す"""
+    g = g.copy().sort_values("banum")
+
+    # マーク情報
+    mark_map = {}
+    for _, row in g.iterrows():
+        mk = str(row.get("mark","")).strip()
+        if mk and mk not in ("nan",""):
+            mark_map[int(row["banum"])] = mk
+
+    # ライン構成（同地区 or 同期で2名以上）
+    pref_groups = g.groupby("pref")["banum"].apply(list).to_dict()
+    lines = {p: sorted([int(b) for b in bs]) for p, bs in pref_groups.items() if len(bs) >= 2}
+
+    # ライン文字列
+    line_parts = []
+    for pref, bans in sorted(lines.items(), key=lambda x: -len(x[1])):
+        bstr = "-".join(str(b) for b in bans)
+        line_parts.append(f"{bstr}({pref[:2]}{''.join(mark_map.get(b,'') for b in bans)})")
+    line_str = "  ".join(line_parts) if line_parts else "単騎多数"
+
+    # 予想3選手の情報
+    pi = g.set_index("banum")
+    def player_info(bn):
+        try:
+            r = pi.loc[bn]
+            st = STYLE_LABEL.get(int(r.get("style_num",2)), "?")
+            cl = CLASS_LABEL.get(int(r.get("class_num",1)), "?")
+            sc = r.get("race_score", float("nan"))
+            sc_str = f"{sc:.0f}pt" if pd.notna(sc) else "?"
+            mk = mark_map.get(bn, "")
+            return f"{mk}{bn}番:{cl}/{st}/{sc_str}"
+        except Exception:
+            return f"{bn}番"
+
+    picks = f"{player_info(b1)} → {player_info(b2)} → {player_info(b3)}"
+
+    # 有力逃げ屋
+    nige_rows = g[g["style_num"]==5].sort_values("race_score", ascending=False)
+    if not nige_rows.empty:
+        nr = nige_rows.iloc[0]
+        nige_str = f"逃{int(nr['banum'])}番({nr.get('race_score',0):.0f}pt)"
+    else:
+        nige_str = "逃げ不在"
+
+    # スコア上位3名
+    top3 = g.nlargest(3, "race_score")[["banum","race_score","style_num","player_class"]]
+    top3_str = "  ".join(
+        f"{int(r['banum'])}番{r.get('player_class','?')}({r.get('race_score',0):.0f})"
+        for _, r in top3.iterrows()
+    )
+
+    # n_strong_lines
+    n_strong = int(g["n_strong_lines"].iloc[0]) if "n_strong_lines" in g.columns else 0
+
+    lines_out = [
+        f"  ライン: {line_str}  強ライン{n_strong}本",
+        f"  得点上位: {top3_str}",
+        f"  {nige_str}",
+        f"  予想根拠: {picks}",
+    ]
+    return "\n".join(lines_out)
+
+
 pred_rows = []
 for race_id, g in df_today.groupby("race_id"):
     top_score = top_score_raw.get(race_id, 0)
@@ -487,6 +555,10 @@ for race_id, g in df_today.groupby("race_id"):
     if pd.isna(ct_val) or str(ct_val).strip() in ("", "nan"):
         ct_val = venue_close.get(g["venue_slug"].iloc[0], {}).get(race_no, "")
     close_time = str(ct_val) if ct_val else ""
+
+    # ---- レースサマリー生成 ----
+    summary = build_race_summary(g, int(best["b1"]), int(best["b2"]), int(best["b3"]))
+
     pred_rows.append({
         "race_id": race_id, "venue": g["venue_slug"].iloc[0],
         "date": g["date"].iloc[0], "race_no": race_no,
@@ -495,6 +567,7 @@ for race_id, g in df_today.groupby("race_id"):
         "passes_threshold": bool(best["combo_score"] >= COMBO_THRESHOLD),
         "top_score": top_score, "score_gap": score_gap,
         "close_time": close_time,
+        "summary": summary,
     })
 
 n_high = sum(1 for r in pred_rows if r["passes_threshold"])
@@ -516,7 +589,8 @@ else:
         lines.append(
             f"{star}:round_pushpin: **{r['venue']} {r['race_no']}R**{time_str}\n"
             f"  予想: `{r['pred_1st']}-{r['pred_2nd']}-{r['pred_3rd']}`\n"
-            f"  score:{r['top_score']:.0f} gap:{r['score_gap']:.1f}  (combo:{r['combo_score']:.4f})"
+            f"  score:{r['top_score']:.0f} gap:{r['score_gap']:.1f}  (combo:{r['combo_score']:.4f})\n"
+            + r.get("summary","")
         )
     msg = "\n".join(lines)
     print(msg)
